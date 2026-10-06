@@ -1,51 +1,103 @@
-import numpy as np, sys
+"""Бесшовный шум «как вата» для деталей облачной сферы.
+
+Тот же рецепт, что у объёмных облаков (HDRP, Horizon Zero Dawn): Perlin-Worley.
+Инвертированный Worley даёт круглые пухлые комки, несколько октав — «цветную
+капусту» на краях комков, Perlin склеивает комки в облачные массы.
+Всё считается на периодической решётке, поэтому текстура замыкается по обеим осям.
+
+    python make_cloud_noise.py <выход.png> [размер]
+"""
+import sys
+import numpy as np
 from PIL import Image
 
-N = 1024
-rng = np.random.default_rng(12345)
+rng = np.random.default_rng(7)
 
-def perlin(n, period, rng):
-    """Периодический градиентный шум: решётка period x period, замыкается сама на себя."""
-    ang = rng.uniform(0, 2*np.pi, (period, period))
+
+def coords(n, cells):
+    c = (np.arange(n) + 0.5) * cells / n
+    return np.meshgrid(c, c)            # x — столбцы, y — строки
+
+
+def perlin(n, period):
+    """Периодический градиентный шум, примерно -0.7..0.7."""
+    ang = rng.uniform(0, 2 * np.pi, (period, period))
     gx, gy = np.cos(ang), np.sin(ang)
-    c = np.arange(n) * period / n
-    x, y = np.meshgrid(c, c)            # x — столбцы, y — строки
+    x, y = coords(n, period)
     x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
     fx, fy = x - x0, y - y0
+    x0, y0 = x0 % period, y0 % period
     x1, y1 = (x0 + 1) % period, (y0 + 1) % period
-    def dot(ix, iy, dx, dy):
-        return gx[iy, ix]*dx + gy[iy, ix]*dy
-    n00 = dot(x0, y0, fx, fy);     n10 = dot(x1, y0, fx-1, fy)
-    n01 = dot(x0, y1, fx, fy-1);   n11 = dot(x1, y1, fx-1, fy-1)
-    u = fx*fx*fx*(fx*(fx*6-15)+10); v = fy*fy*fy*(fy*(fy*6-15)+10)
-    return (n00*(1-u) + n10*u)*(1-v) + (n01*(1-u) + n11*u)*v
 
-def fbm(n, base, octaves, rng):
-    s, amp, tot = np.zeros((n, n)), 1.0, 0.0
+    def dot(ix, iy, dx, dy):
+        return gx[iy, ix] * dx + gy[iy, ix] * dy
+
+    u = fx ** 3 * (fx * (fx * 6 - 15) + 10)
+    v = fy ** 3 * (fy * (fy * 6 - 15) + 10)
+    a = dot(x0, y0, fx, fy) * (1 - u) + dot(x1, y0, fx - 1, fy) * u
+    b = dot(x0, y1, fx, fy - 1) * (1 - u) + dot(x1, y1, fx - 1, fy - 1) * u
+    return a * (1 - v) + b * v
+
+
+def perlin_fbm(n, base, octaves):
+    s, amp, tot = 0.0, 1.0, 0.0
     for o in range(octaves):
-        s += perlin(n, base * 2**o, rng) * amp
-        tot += amp; amp *= 0.5
+        s = s + perlin(n, base * 2 ** o) * amp
+        tot += amp
+        amp *= 0.5
     return s / tot
 
-f = fbm(N, 4, 7, rng)
-# немного «облачности»: смесь обычного fBm и billow (|шум|), всё периодическое
-b = 1 - np.abs(fbm(N, 8, 6, rng)) * 2
-img = 0.65*f + 0.35*b
 
-lo, hi = np.percentile(img, [0.5, 99.5])
-img = np.clip((img - lo) / (hi - lo), 0, 1)
-img = np.clip(img - img.mean() + 0.5, 0, 1)   # среднее ровно 0.5
+def worley(n, cells, k=0.12):
+    """Периодический клеточный шум с круглыми комками, 0..1.
+    Вместо обычного минимума расстояний — мягкий (smooth-min), поэтому между
+    соседними комками нет острых рёбер, они сливаются, как вата.
+    Профиль комка — купол (1 - d^2)^2, а не конус."""
+    jit = rng.uniform(0, 1, (cells, cells, 2))
+    x, y = coords(n, cells)
+    cx, cy = np.floor(x).astype(int), np.floor(y).astype(int)
+    acc = np.zeros(x.shape)
+    for oy in (-2, -1, 0, 1, 2):
+        for ox in (-2, -1, 0, 1, 2):
+            nx, ny = cx + ox, cy + oy
+            p = jit[ny % cells, nx % cells]
+            dx = nx + p[..., 0] - x
+            dy = ny + p[..., 1] - y
+            acc += np.exp(-np.sqrt(dx * dx + dy * dy) / k)
+    d = np.clip(-k * np.log(acc), 0, 1)
+    return (1.0 - d * d) ** 2
 
-out = sys.argv[1]
-Image.fromarray((img*255 + 0.5).astype(np.uint8), 'L').save(out)
 
-# проверка шва: скачок через край против обычного скачка между соседями
-a = img
-seam = np.abs(a[:, 0] - a[:, -1]).mean() + np.abs(a[0, :] - a[-1, :]).mean()
-inner = np.abs(np.diff(a, axis=1)).mean() + np.abs(np.diff(a, axis=0)).mean()
-print(f"mean={a.mean():.3f} min={a.min():.2f} max={a.max():.2f} seam={seam:.4f} inner={inner:.4f}")
+def remap(v, lo, hi, nlo, nhi):
+    return nlo + (v - lo) / (hi - lo) * (nhi - nlo)
 
-t = Image.open(out); prev = Image.new('L', (N*2, N*2))
-for i in (0, N):
-    for j in (0, N): prev.paste(t, (i, j))
-prev.resize((1024, 1024)).save(sys.argv[2])
+
+def main():
+    out = sys.argv[1]
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 1024
+
+    # Worley-fBm: крупные комки + всё более мелкие пузыри по их краям
+    w = (0.625 * worley(n, 7) +
+         0.25 * worley(n, 13) +
+         0.125 * worley(n, 29))
+    w = remap(w, w.min(), w.max(), 0, 1)
+
+    # Perlin-Worley: Perlin задаёт, где облачная масса, Worley делает её комковатой
+    p = remap(perlin_fbm(n, 4, 4), -0.7, 0.7, 0, 1)
+    pw = np.clip(remap(p, w - 1.0, 1.0, 0.0, 1.0), 0, 1)
+
+    img = 0.55 * pw + 0.45 * w
+    # чуть поднять контраст, чтобы комки читались, затем среднее ровно 0.5
+    lo, hi = np.percentile(img, [1, 99.5])
+    img = np.clip((img - lo) / (hi - lo), 0, 1)
+    img = np.clip(img - img.mean() + 0.5, 0, 1)
+
+    Image.fromarray((img * 255 + 0.5).astype(np.uint8), "L").save(out)
+
+    seam = np.abs(img[:, 0] - img[:, -1]).mean() + np.abs(img[0] - img[-1]).mean()
+    inner = np.abs(np.diff(img, axis=1)).mean() + np.abs(np.diff(img, axis=0)).mean()
+    print(f"{out}: {n}x{n} mean={img.mean():.3f} шов={seam:.4f} соседи={inner:.4f}")
+
+
+if __name__ == "__main__":
+    main()
