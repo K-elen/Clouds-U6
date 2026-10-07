@@ -83,7 +83,9 @@ void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS
 
     // Непрозрачность столба сверху: 1 - exp(-сумма плотностей * sigma * длина шага).
     // sigma = 0.04 (без Rain Map), плотность HDRP = Density Multiplier^2 * 2 — в Coverage.z.
-    float detailed = 1.0 - exp(-opticalDepth * 0.04 * Coverage.z * CLOUD_SHELL_STEP_FRACTION * thickness);
+    // Под углом луч идёт сквозь слой длиннее, чем по вертикали, — как и у лучей HDRP.
+    float slant = 1.0 / max(abs(dot(normalize(PositionWS), up)), 0.1);
+    float detailed = 1.0 - exp(-opticalDepth * 0.04 * Coverage.z * CLOUD_SHELL_STEP_FRACTION * thickness * slant);
 
     // Вдали детали мельче пикселя — плавно переходим к карте как есть.
     // PositionWS в HDRP отсчитывается от камеры.
