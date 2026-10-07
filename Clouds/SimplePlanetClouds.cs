@@ -466,14 +466,21 @@ public class SimplePlanetClouds : MonoBehaviour
             _groundDensity * _groundDensity * 2f * shellOpacity, offset.y));
 
         // Altitude Distortion: в шейдере умножается на высоту шага в слое
-        Vector2 distortion = Vector2.zero;
-        if (_cam != null)
-        {
-            float theta = _clouds.orientation.GetValue(HDCamera.GetOrCreate(_cam)) * Mathf.Deg2Rad;
-            distortion = new Vector2(-Mathf.Cos(theta), -Mathf.Sin(theta)) * (_clouds.altitudeDistortion.value * 0.25f);
-        }
+        float theta = WindOrientationDeg() * Mathf.Deg2Rad;
+        Vector2 distortion = new Vector2(-Mathf.Cos(theta), -Mathf.Sin(theta)) * (_clouds.altitudeDistortion.value * 0.25f);
         _shellMat.SetVector("_CloudMisc", new Vector4(distortion.x, distortion.y, _clouds.altitudeRange.value, 0f));
         _shellMat.SetVector("_CloudFade", new Vector4(detailFadeStartKm * 1000f, detailFadeEndKm * 1000f, 0f, 0f));
+    }
+
+    /// <summary>Направление ветра облаков, как WindOrientationParameter.GetValue в HDRP, но без HDCamera:
+    /// значение Global берётся из Visual Environment того же skyVolume.</summary>
+    float WindOrientationDeg()
+    {
+        var wind = _clouds.orientation.value;
+        if (wind.mode == WindParameter.WindOverrideMode.Custom) return wind.customValue;
+
+        float global = skyVolume.profile.TryGet(out VisualEnvironment env) ? env.windOrientation.value : 0f;
+        return wind.mode == WindParameter.WindOverrideMode.Additive ? global + wind.additiveValue : global;
     }
 
 #if UNITY_EDITOR
