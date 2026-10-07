@@ -61,6 +61,22 @@ public class SimplePlanetClouds : MonoBehaviour
     [Tooltip("Поменять местами оси X и Z (если тестовая фигура повёрнута на 90°).")]
     public bool swapXZ = false;
 
+    [Header("Детали сферы как у объёмных облаков")]
+    [Tooltip("3D-шум формы из HDRP (WorleyNoise128RGBA). В редакторе подставляется сам.")]
+    public Texture3D hdrpShapeNoise;
+    [Tooltip("3D-шум эрозии HDRP Worley 32 (WorleyNoise32RGB). В редакторе подставляется сам.")]
+    public Texture3D hdrpWorleyErosion;
+    [Tooltip("3D-шум эрозии HDRP Perlin 32 (PerlinNoise32RGB). В редакторе подставляется сам.")]
+    public Texture3D hdrpPerlinErosion;
+
+    [Tooltip("Насколько плотной выглядит сфера в облаках. 1 — по плотности объёмных облаков.")]
+    [Range(0.1f, 4f)] public float shellOpacity = 1f;
+
+    [Tooltip("С какого расстояния от камеры детали на сфере начинают гаснуть.")]
+    public float detailFadeStartKm = 150f;
+    [Tooltip("С какого расстояния на сфере остаётся только карта облаков.")]
+    public float detailFadeEndKm = 800f;
+
     [Header("Калибровка")]
     [Tooltip("Положить в объёмные облака тестовую фигуру и нарисовать красный контур там, где она должна быть.")]
     public bool testPattern = false;
@@ -219,6 +235,13 @@ public class SimplePlanetClouds : MonoBehaviour
                 Warn("3. материал сферы Opaque — поставьте Surface Type = Transparent");
             else
                 Ok("3. материал сферы Transparent");
+
+            if (!_shellMat.HasProperty("_CloudShape"))
+                Warn("3. у материала сферы нет _CloudShape — это старый граф, детали как у объёмных не появятся");
+            else if (hdrpShapeNoise == null || hdrpWorleyErosion == null || hdrpPerlinErosion == null)
+                Warn("3. не заданы 3D-шумы HDRP (hdrpShapeNoise, hdrpWorleyErosion, hdrpPerlinErosion)");
+            else
+                Ok("3. детали сферы: шум формы и эрозии HDRP");
         }
         catch (System.Exception e)
         {
@@ -359,6 +382,7 @@ public class SimplePlanetClouds : MonoBehaviour
         _shellMat.SetColor("_BaseColor", tint);
         _shell.transform.localScale = Vector3.one * (planetRadiusKm + shellAltitudeKm + lift) * 1000f;
         _shell.SetActive(shellAlpha > 0.001f);
+        UpdateShellDetail();
 
         if (_border != null) _border.SetActive(showPatchBorder);
 
@@ -406,6 +430,71 @@ public class SimplePlanetClouds : MonoBehaviour
             RebuildPatchStuff();
         }
     }
+
+    /// <summary>Передаёт в материал сферы настройки формы и эрозии из Volumetric Clouds,
+    /// чтобы шейдер считал края облаков по той же формуле, что и HDRP (CloudShellHDRP.hlsl).</summary>
+    void UpdateShellDetail()
+    {
+        if (_clouds == null || !_shellMat.HasProperty("_CloudShape")) return;
+
+        float bottom = planetRadiusKm * 1000f + _clouds.bottomAltitude.value;
+        Vector3 c = PlanetCenter;
+        _shellMat.SetVector("_CloudLayer", new Vector4(c.x, c.y, c.z, bottom));
+
+        Vector3 offset = _clouds.shapeOffset.value;
+        _shellMat.SetVector("_CloudShape", new Vector4(_clouds.shapeScale.value, _clouds.shapeFactor.value,
+                                                       offset.x, offset.z));
+
+        // как ErosionNoiseTypeToTexture / ErosionNoiseTypeToErosionCompensation в HDRP
+        bool perlin = _clouds.erosionNoiseType.value == VolumetricClouds.CloudErosionNoise.Perlin32;
+        float compensation = perlin ? 0.75f : 1f;
+        bool micro = _clouds.cloudControl.value == VolumetricClouds.CloudControl.Simple
+            ? _clouds.cloudSimpleMode.value == VolumetricClouds.CloudSimpleMode.Quality
+            : _clouds.microErosion.value;
+        _shellMat.SetVector("_CloudErosion", new Vector4(
+            _clouds.erosionScale.value, _clouds.erosionFactor.value * 0.75f * compensation,
+            _clouds.microErosionScale.value, micro ? _clouds.microErosionFactor.value * 0.5f * compensation : 0f));
+
+        if (hdrpShapeNoise != null) _shellMat.SetTexture("_ShapeNoise", hdrpShapeNoise);
+        Texture3D erosion = perlin ? hdrpPerlinErosion : hdrpWorleyErosion;
+        if (erosion != null) _shellMat.SetTexture("_ErosionNoise", erosion);
+
+        // покрытие как у патча, умноженное на Cumulus Map Multiplier;
+        // плотность как в HDRP: Density Multiplier^2 * 2 (берём значение у земли, до перехода)
+        _shellMat.SetVector("_CloudCoverage", new Vector4(
+            coverageThreshold, coverageMultiplier * _clouds.cumulusMapMultiplier.value,
+            _groundDensity * _groundDensity * 2f * shellOpacity, offset.y));
+
+        // Altitude Distortion: в шейдере умножается на высоту шага в слое
+        Vector2 distortion = Vector2.zero;
+        if (_cam != null)
+        {
+            float theta = _clouds.orientation.GetValue(HDCamera.GetOrCreate(_cam)) * Mathf.Deg2Rad;
+            distortion = new Vector2(-Mathf.Cos(theta), -Mathf.Sin(theta)) * (_clouds.altitudeDistortion.value * 0.25f);
+        }
+        _shellMat.SetVector("_CloudMisc", new Vector4(distortion.x, distortion.y, _clouds.altitudeRange.value, 0f));
+        _shellMat.SetVector("_CloudFade", new Vector4(detailFadeStartKm * 1000f, detailFadeEndKm * 1000f, 0f, 0f));
+    }
+
+#if UNITY_EDITOR
+    const string HdrpNoiseDir =
+        "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipelineResources/Texture/VolumetricClouds/";
+
+    void Reset() => FindHdrpNoise();
+    void OnValidate() => FindHdrpNoise();
+
+    /// <summary>Находит в пакете HDRP те же 3D-текстуры, которыми рисуются объёмные облака.
+    /// Ссылки сохраняются в сцене, поэтому в билде они тоже будут.</summary>
+    void FindHdrpNoise()
+    {
+        if (hdrpShapeNoise == null)
+            hdrpShapeNoise = UnityEditor.AssetDatabase.LoadAssetAtPath<Texture3D>(HdrpNoiseDir + "WorleyNoise128RGBA.png");
+        if (hdrpWorleyErosion == null)
+            hdrpWorleyErosion = UnityEditor.AssetDatabase.LoadAssetAtPath<Texture3D>(HdrpNoiseDir + "WorleyNoise32RGB.png");
+        if (hdrpPerlinErosion == null)
+            hdrpPerlinErosion = UnityEditor.AssetDatabase.LoadAssetAtPath<Texture3D>(HdrpNoiseDir + "PerlinNoise32RGB.png");
+    }
+#endif
 
     string SettingsKey() =>
         $"{matchPattern}|{patchSizeKm}|{hdrpTileSizeKm}|{coverageThreshold}|{coverageMultiplier}|" +
