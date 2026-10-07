@@ -31,8 +31,8 @@ float CloudShellRemap(float x, float a)
 // Layer    = центр планеты (xyz, абсолютные мировые координаты), радиус низа слоя (w), метры
 // Shape    = Shape Scale, Shape Factor, Shape Offset X, Shape Offset Z
 // Erosion  = Erosion Scale, сила эрозии, Micro Erosion Scale, сила микроэрозии (0 = выкл)
-// Coverage = порог покрытия, множитель покрытия (с Cumulus Map Multiplier), плотность, Shape Offset Y
-// Misc     = сдвиг от Altitude Distortion (xy), толщина слоя в метрах (z), unused (w)
+// Coverage = порог покрытия, множитель покрытия, плотность, Shape Offset Y
+// Misc     = сдвиг от Altitude Distortion (xy), толщина слоя в метрах (z), степень покрытия coverageGamma (w)
 // Fade     = с какого расстояния детали гаснут, где пропадают совсем (метры)
 void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS, float3 PositionAWS,
                            UnityTexture3D ShapeNoise, UnityTexture3D ErosionNoise,
@@ -43,6 +43,7 @@ void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS
 
     // покрытие — так же, как скрипт режет патч, и как HDRP читает Cumulus Map
     float cov = saturate((A - Coverage.x) / max(1.0 - Coverage.x, 1e-4) * Coverage.y);
+    cov = pow(cov, Misc.w > 0.0 ? Misc.w : 1.0);
     cov = cov < 0.01 ? 0.0 : cov;
 
     float3 up = normalize(PositionAWS - Layer.xyz);

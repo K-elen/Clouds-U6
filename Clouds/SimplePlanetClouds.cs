@@ -56,6 +56,10 @@ public class SimplePlanetClouds : MonoBehaviour
     public float hdrpTileSizeKm = 124f;
     [Range(0f, 0.9f)] public float coverageThreshold = 0.2f;
     [Range(0f, 3f)] public float coverageMultiplier = 1f;
+    [Tooltip("Как полупрозрачные места карты превращаются в облака. HDRP возводит покрытие в квадрат, " +
+             "и без поправки полупрозрачное почти исчезает. 0.35–0.5 — доля неба под комками примерно " +
+             "равна альфе карты; 1 — как раньше. Действует одинаково на объёмные облака и сферу.")]
+    [Range(0.2f, 1f)] public float coverageGamma = 0.4f;
     public bool flipX = false;
     public bool flipZ = false;
     [Tooltip("Поменять местами оси X и Z (если тестовая фигура повёрнута на 90°).")]
@@ -459,16 +463,16 @@ public class SimplePlanetClouds : MonoBehaviour
         Texture3D erosion = perlin ? hdrpPerlinErosion : hdrpWorleyErosion;
         if (erosion != null) _shellMat.SetTexture("_ErosionNoise", erosion);
 
-        // покрытие как у патча, умноженное на Cumulus Map Multiplier;
+        // покрытие как у патча (Cumulus Map Multiplier скрипт держит равным 1, см. BuildPatch);
         // плотность как в HDRP: Density Multiplier^2 * 2 (берём значение у земли, до перехода)
         _shellMat.SetVector("_CloudCoverage", new Vector4(
-            coverageThreshold, coverageMultiplier * _clouds.cumulusMapMultiplier.value,
+            coverageThreshold, coverageMultiplier,
             _groundDensity * _groundDensity * 2f * shellOpacity, offset.y));
 
         // Altitude Distortion: в шейдере умножается на высоту шага в слое
         float theta = WindOrientationDeg() * Mathf.Deg2Rad;
         Vector2 distortion = new Vector2(-Mathf.Cos(theta), -Mathf.Sin(theta)) * (_clouds.altitudeDistortion.value * 0.25f);
-        _shellMat.SetVector("_CloudMisc", new Vector4(distortion.x, distortion.y, _clouds.altitudeRange.value, 0f));
+        _shellMat.SetVector("_CloudMisc", new Vector4(distortion.x, distortion.y, _clouds.altitudeRange.value, coverageGamma));
         _shellMat.SetVector("_CloudFade", new Vector4(detailFadeStartKm * 1000f, detailFadeEndKm * 1000f, 0f, 0f));
     }
 
@@ -504,7 +508,7 @@ public class SimplePlanetClouds : MonoBehaviour
 #endif
 
     string SettingsKey() =>
-        $"{matchPattern}|{patchSizeKm}|{hdrpTileSizeKm}|{coverageThreshold}|{coverageMultiplier}|" +
+        $"{matchPattern}|{patchSizeKm}|{hdrpTileSizeKm}|{coverageThreshold}|{coverageMultiplier}|{coverageGamma}|" +
         $"{flipX}|{flipZ}|{swapXZ}|{testPattern}|{startLatitude}|{startLongitude}|{shellAltitudeKm}";
 
     void RebuildPatchStuff()
@@ -639,8 +643,8 @@ public class SimplePlanetClouds : MonoBehaviour
 
                 float a = testPattern
                     ? TestPattern(fx, fz)
-                    : Mathf.Clamp01((src.GetPixelBilinear(uv.x, uv.y).a - coverageThreshold)
-                                    / (1f - coverageThreshold) * coverageMultiplier);
+                    : Mathf.Pow(Mathf.Clamp01((src.GetPixelBilinear(uv.x, uv.y).a - coverageThreshold)
+                                              / (1f - coverageThreshold) * coverageMultiplier), coverageGamma);
 
                 sumOut += a;
                 if (a > maxOut) maxOut = a;
@@ -674,6 +678,11 @@ public class SimplePlanetClouds : MonoBehaviour
         _clouds.cloudControl.Override(VolumetricClouds.CloudControl.Advanced);
         _clouds.cloudMapResolution.Override(VolumetricClouds.CloudMapResolution.Ultra256x256);
         _clouds.cumulusMap.Override(_patch);
+        // Покрытие целиком задают coverageThreshold/Multiplier/Gamma — так его повторяет и сфера.
+        if (!Mathf.Approximately(_clouds.cumulusMapMultiplier.value, 1f))
+            Warn($"5. Cumulus Map Multiplier = {_clouds.cumulusMapMultiplier.value:F2} заменён на 1, " +
+                 "вместо него используйте coverageMultiplier");
+        _clouds.cumulusMapMultiplier.Override(1f);
         _clouds.cloudTiling.Override(new Vector2(TilingK, TilingK));
     }
 
