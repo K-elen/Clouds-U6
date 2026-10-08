@@ -9,14 +9,15 @@ using UnityEngine.Rendering.HighDefinition;
 ///  - выше — сфера вокруг планеты с текстурой облаков всей планеты.
 ///
 /// Чтобы при смене слоёв рисунок не прыгал, скрипт вырезает из текстуры планеты квадрат
-/// вокруг точки старта (патч) и отдаёт его объёмным облакам как карту покрытия (Cumulus Map).
+/// вокруг камеры (патч) и отдаёт его объёмным облакам как карту покрытия (Cumulus Map).
+/// Патч едет вместе с камерой: при полёте перерисовываются только его дальние края.
 /// Масштаб и ориентация патча считаются по формулам самого HDRP, калибровать ничего не нужно.
 ///
 /// Сферу рисует шейдер CloudShellHDRP.hlsl. Он считает края облаков той же формулой и тем же
 /// шумом формы и эрозии, что и HDRP. Настройки этого шума скрипт каждый кадр переносит
 /// из Volumetric Clouds в материал сферы.
 ///
-/// Отладка: панель в левом верхнем углу — высота, переход, мини-карта патча с камерой,
+/// Отладка: панель в левом верхнем углу — высота, переход, мини-карта вокруг камеры с патчем,
 /// направлением взгляда и горизонтом, и карта планеты с местом патча.
 /// </summary>
 public class SimplePlanetClouds : MonoBehaviour
@@ -64,9 +65,9 @@ public class SimplePlanetClouds : MonoBehaviour
              "Пусто — берётся Base Color Map из материала сферы.")]
     public Texture2D patchSourceTexture;
 
-    [Tooltip("Сторона патча, км: на этом квадрате вокруг старта объёмные облака повторяют карту. " +
-             "Дальше HDRP повторяет патч по кругу. Больше — шире совпадение, но крупнее пиксели: " +
-             "в патче всего 256×256 пикселей.")]
+    [Tooltip("Сторона патча, км: на квадрате такого размера вокруг камеры объёмные облака повторяют карту. " +
+             "Патч едет вместе с камерой; дальше его краёв HDRP повторяет патч по кругу. " +
+             "Больше — шире совпадение, но крупнее пиксели: в патче всего 256×256 пикселей.")]
     public float patchSizeKm = 1000f;
 
     [Tooltip("Альфа карты ниже этого значения — ясное небо.")]
@@ -128,10 +129,19 @@ public class SimplePlanetClouds : MonoBehaviour
     GameObject _shell;
     Material _shellMat;          // копия shellMaterial, чтобы не менять ассет
     bool _shellHasDetail;        // в материале есть параметры CloudShellHDRP
-    Texture2D _patch;
-    Texture _patchSource;        // карта, из которой вырезан патч (для превью в панели)
-    string _patchKey;            // настройки, с которыми собран патч; изменились — пересобираем
-    string _patchError;          // почему патч не собрался
+    Texture2D _patch;            // карта покрытия для HDRP
+    Color32[] _patchPixels;      // её содержимое; перерисовываются только устаревшие строки и столбцы
+    Texture2D _patchSource;      // карта облаков планеты, из которой режется патч
+    Quaternion _worldToMap;      // поворот из осей мира в оси карты (обратный к повороту сферы)
+    string _patchKey;            // настройки, с которыми собран патч; изменились — собираем заново
+    string _patchError;          // почему патч не собирается
+
+    // Какая «копия» патча (см. раздел «Патч») сейчас нарисована в каждом столбце и каждой строке,
+    // и какие из них на этом кадре нужно перерисовать.
+    readonly int[] _columnCopy = new int[PatchResolution];
+    readonly int[] _rowCopy = new int[PatchResolution];
+    readonly bool[] _columnDirty = new bool[PatchResolution];
+    readonly bool[] _rowDirty = new bool[PatchResolution];
 
     float _altitudeKm;           // высота камеры над землёй
     float _horizonKm;            // расстояние до горизонта с этой высоты
@@ -259,7 +269,7 @@ public class SimplePlanetClouds : MonoBehaviour
                       "вместо него используйте coverageMultiplier", this);
         _clouds.cumulusMapMultiplier.Override(1f);
 
-        RebuildPatchIfNeeded();
+        UpdatePatch();
     }
 
     // ==================================================================
@@ -277,7 +287,7 @@ public class SimplePlanetClouds : MonoBehaviour
         // 0 ниже fadeStartKm, 1 выше fadeEndKm, плавно между ними
         _transition = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(fadeStartKm, fadeEndKm, _altitudeKm));
 
-        RebuildPatchIfNeeded();
+        UpdatePatch();
         UpdateVolumetricClouds();
         UpdateShell();
         UpdateFarClip();
@@ -340,7 +350,17 @@ public class SimplePlanetClouds : MonoBehaviour
     }
 
     // ==================================================================
-    // Патч: кусок карты облаков для объёмных облаков
+    // Патч: кусок карты облаков вокруг камеры для объёмных облаков
+    //
+    // HDRP повторяет Cumulus Map по кругу с шагом patchSizeKm: точка мира (x, z) читает пиксель
+    // (x / patchSize + 0.5;  0.5 - z / patchSize), взятый по модулю 1. Значит, каждый пиксель патча
+    // отвечает сразу за много мест мира — по одному в каждой «копии» патча, через patchSizeKm.
+    //
+    // Чтобы патч следовал за камерой, каждый столбец патча хранит ту копию, которая ближе всего
+    // к камере по X, а каждая строка — ближайшую по Z. Тогда в квадрате patchSizeKm вокруг камеры
+    // объёмные облака всегда совпадают с картой. Камера сдвинулась — ближайшая копия меняется только
+    // у столбцов и строк на дальнем краю, в patchSizeKm / 2 от неё; перерисовываются только они.
+    // Облака рядом с камерой при этом не меняются вовсе, поэтому ничего не «прыгает».
 
     /// <summary>
     /// Сколько метров мира занимает одна карта облаков HDRP при Cloud Tiling = 1.
@@ -355,82 +375,128 @@ public class SimplePlanetClouds : MonoBehaviour
     }
 
     /// <summary>
-    /// Пиксель патча (u, v от 0 до 1) → точка мира (x, z), метры. Так HDRP читает Cumulus Map:
-    /// X мира идёт вдоль U, а Z мира — против V (HDRP переворачивает карту по вертикали,
-    /// tapUV = (x, 1 - y) в CloudMapGenerator.compute). Центр патча — над началом координат.
+    /// Середина столбца i патча по X мира — для копии номер 0, то есть патча вокруг начала координат.
+    /// X мира идёт вдоль U карты.
     /// </summary>
-    Vector2 PatchPixelToWorldXZ(float u, float v) =>
-        new Vector2((u - 0.5f) * PatchSizeM, (0.5f - v) * PatchSizeM);
+    float ColumnX(int i) => ((i + 0.5f) / PatchResolution - 0.5f) * PatchSizeM;
 
     /// <summary>
-    /// Альфа карты → покрытие облаками 0..1: порог, множитель и степень.
+    /// Середина строки j патча по Z мира — для копии номер 0. Z мира идёт против V карты:
+    /// HDRP переворачивает карту по вертикали (tapUV = (x, 1 - y) в CloudMapGenerator.compute).
+    /// </summary>
+    float RowZ(int j) => (0.5f - (j + 0.5f) / PatchResolution) * PatchSizeM;
+
+    /// <summary>
+    /// Альфа карты облаков → покрытие 0..1: порог, множитель и степень.
     /// Шейдер сферы считает ровно так же (CloudShellHDRP.hlsl), поэтому слои совпадают.
     /// </summary>
     float Coverage(float alpha) =>
         Mathf.Pow(Mathf.Clamp01((alpha - coverageThreshold) / (1f - coverageThreshold) * coverageMultiplier),
                   coverageGamma);
 
-    /// <summary>Пересобирает патч, если изменились настройки, от которых он зависит.</summary>
-    void RebuildPatchIfNeeded()
+    /// <summary>
+    /// UV карты облаков над точкой мира (x, z): берём точку сферы облаков прямо над ней
+    /// и переводим её направление в оси карты.
+    /// </summary>
+    Vector2 MapUVAbove(float x, float z)
     {
-        string key = $"{startLatitude}|{startLongitude}|{patchSizeKm}|{coverageThreshold}|{coverageMultiplier}|" +
-                     $"{coverageGamma}|{planetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}";
-        if (key == _patchKey) return;
-        _patchKey = key;
-
-        _shell.transform.rotation = MapRotation;   // широта и долгота старта могли поменяться
-        _patchError = BuildPatch();
-        if (_patchError != null) Debug.LogWarning("[Clouds] " + _patchError, this);
+        float r = (planetRadiusKm + shellAltitudeKm) * 1000f;
+        float y = Mathf.Sqrt(Mathf.Max(r * r - x * x - z * z, 0f));
+        return DirToUV(_worldToMap * new Vector3(x, y, z).normalized);
     }
 
     /// <summary>
-    /// Вырезает из карты облаков квадрат patchSizeKm × patchSizeKm вокруг старта и отдаёт его
-    /// объёмным облакам как Cumulus Map. Для каждого пикселя патча: где он лежит в мире,
-    /// какая точка сферы облаков над этим местом и что нарисовано на карте в этой точке.
-    /// Возвращает текст ошибки или null, если всё получилось.
+    /// Каждый кадр держит патч вокруг камеры. Поменялись настройки — весь патч считается устаревшим.
+    /// Затем для каждого столбца и строки выбирается копия, ближайшая к камере, и перерисовываются
+    /// те, у которых она сменилась. В полёте это несколько столбцов раз в несколько секунд.
     /// </summary>
-    string BuildPatch()
+    void UpdatePatch()
     {
-        _patchSource = patchSourceTexture != null ? patchSourceTexture : shellMaterial.GetTexture("_BaseColorMap");
-        var source = _patchSource as Texture2D;
-        if (source == null)
-            return "нет карты облаков: задайте patchSourceTexture или Base Color Map в материале сферы";
-        if (!source.isReadable)
-            return $"у '{source.name}' выключен Read/Write — включите или задайте читаемую копию в patchSourceTexture";
+        string key = $"{startLatitude}|{startLongitude}|{patchSizeKm}|{coverageThreshold}|{coverageMultiplier}|" +
+                     $"{coverageGamma}|{planetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}";
+        if (key != _patchKey)
+        {
+            _patchKey = key;
+            _shell.transform.rotation = MapRotation;   // широта и долгота старта могли поменяться
+            _worldToMap = Quaternion.Inverse(MapRotation);
+            _patchError = PreparePatch();
+            if (_patchError != null) Debug.LogWarning("[Clouds] " + _patchError, this);
 
-        float shellRadius = (planetRadiusKm + shellAltitudeKm) * 1000f;
-        Quaternion worldToMap = Quaternion.Inverse(MapRotation);
-        var pixels = new Color32[PatchResolution * PatchResolution];
-        float cloudy = 0f;
+            // «ни одна копия ещё не нарисована» — ниже перерисуется весь патч
+            for (int n = 0; n < PatchResolution; n++) _columnCopy[n] = _rowCopy[n] = int.MinValue;
+        }
+        if (_patchError != null) return;
+
+        Vector3 cam = player.position;
+        bool anyColumn = PickNearestCopies(_columnCopy, _columnDirty, cam.x, true);
+        bool anyRow = PickNearestCopies(_rowCopy, _rowDirty, cam.z, false);
+        if (!anyColumn && !anyRow) return;
 
         for (int j = 0; j < PatchResolution; j++)
             for (int i = 0; i < PatchResolution; i++)
-            {
-                Vector2 xz = PatchPixelToWorldXZ((i + 0.5f) / PatchResolution, (j + 0.5f) / PatchResolution);
+                if (_columnDirty[i] || _rowDirty[j])
+                    _patchPixels[j * PatchResolution + i] = PatchPixel(i, j);
 
-                // точка сферы облаков прямо над этим местом мира
-                float y = Mathf.Sqrt(Mathf.Max(shellRadius * shellRadius - xz.x * xz.x - xz.y * xz.y, 0f));
-                Vector2 uv = DirToUV(worldToMap * new Vector3(xz.x, y, xz.y).normalized);
+        _patch.SetPixels32(_patchPixels);
+        _patch.Apply(false);   // HDRP заметит обновление текстуры и перестроит свою карту облаков
+    }
 
-                float coverage = Coverage(source.GetPixelBilinear(uv.x, uv.y).a);
-                cloudy += coverage;
-                byte c = (byte)(coverage * 255f);
-                pixels[j * PatchResolution + i] = new Color32(c, c, c, 255);
-            }
+    /// <summary>
+    /// Для каждого столбца (columns = true) или строки выбирает копию патча, ближайшую к камере
+    /// по этой оси, и помечает те, у которых копия сменилась. Возвращает, сменилась ли хоть одна.
+    /// </summary>
+    bool PickNearestCopies(int[] copies, bool[] dirty, float cameraCoord, bool columns)
+    {
+        bool any = false;
+        for (int n = 0; n < PatchResolution; n++)
+        {
+            float coordInCopy0 = columns ? ColumnX(n) : RowZ(n);
+            int copy = Mathf.FloorToInt((cameraCoord - coordInCopy0) / PatchSizeM + 0.5f);
+            dirty[n] = copy != copies[n];
+            copies[n] = copy;
+            any |= dirty[n];
+        }
+        return any;
+    }
+
+    /// <summary>
+    /// Один пиксель патча: место мира, за которое он сейчас отвечает (его столбец и строка
+    /// с выбранными копиями), и покрытие карты облаков над этим местом.
+    /// </summary>
+    Color32 PatchPixel(int i, int j)
+    {
+        float x = ColumnX(i) + _columnCopy[i] * PatchSizeM;
+        float z = RowZ(j) + _rowCopy[j] * PatchSizeM;
+        Vector2 uv = MapUVAbove(x, z);
+        byte c = (byte)(Coverage(_patchSource.GetPixelBilinear(uv.x, uv.y).a) * 255f);
+        return new Color32(c, c, c, 255);
+    }
+
+    /// <summary>
+    /// Находит карту облаков, из которой режется патч, и создаёт текстуру патча для HDRP.
+    /// Возвращает текст ошибки или null, если всё в порядке.
+    /// </summary>
+    string PreparePatch()
+    {
+        _patchSource = patchSourceTexture != null
+            ? patchSourceTexture
+            : shellMaterial.GetTexture("_BaseColorMap") as Texture2D;
+        if (_patchSource == null)
+            return "нет карты облаков: задайте patchSourceTexture или Base Color Map в материале сферы";
+        if (!_patchSource.isReadable)
+            return $"у '{_patchSource.name}' выключен Read/Write — включите или задайте читаемую копию в patchSourceTexture";
 
         if (_patch == null)
+        {
             _patch = new Texture2D(PatchResolution, PatchResolution, TextureFormat.RGBA32, false, true)
             {
                 name = "CloudPatch",
-                wrapMode = TextureWrapMode.Repeat
+                wrapMode = TextureWrapMode.Repeat   // как и в HDRP: за краем патч повторяется
             };
-        _patch.SetPixels32(pixels);
-        _patch.Apply(false);
+            _patchPixels = new Color32[PatchResolution * PatchResolution];
+        }
         _clouds.cumulusMap.Override(_patch);
-
-        return cloudy <= 0f
-            ? "патч пустой: на карте здесь нет облаков. Уменьшите coverageThreshold или смените широту/долготу"
-            : null;
+        return null;
     }
 
     // ==================================================================
@@ -608,19 +674,16 @@ public class SimplePlanetClouds : MonoBehaviour
             if (_altitudeKm < -1f)
                 lines.Add("<color=#ffb060>! высота отрицательная — planetRadiusKm не совпадает с Planet Radius?</color>");
 
-            Vector2 m = WorldXZToMinimap(player.position.x, player.position.z);
-            bool inside = Mathf.Abs(m.x) <= 0.5f && Mathf.Abs(m.y) <= 0.5f;
-            lines.Add($"патч {patchSizeKm:F0} км, пиксель {patchSizeKm / PatchResolution:F1} км   " +
-                      (inside ? "камера над патчем" : "<color=#ffb060>камера за патчем — объёмные облака повторяют его копию</color>"));
+            lines.Add($"патч {patchSizeKm:F0} км вокруг камеры, пиксель {patchSizeKm / PatchResolution:F1} км");
             lines.Add($"до горизонта ~{_horizonKm:F0} км" +
                       (_horizonKm > patchSizeKm / 2f && _transition < 0.999f
-                          ? " — дальше края патча (серые клетки на мини-карте)" : ""));
+                          ? " — дальше края патча (затемнённое на мини-карте)" : ""));
             if (_cam != null) lines.Add($"Far Clip {_cam.farClipPlane / 1000f:F0} км");
         }
 
         float textHeight = 0f;
         foreach (var l in lines) textHeight += style.CalcHeight(new GUIContent(l), width);
-        bool maps = _ready && _patch != null;
+        bool maps = _ready && _patch != null && _patchError == null;
         GUI.Box(new Rect(5, 5, width + 10, textHeight + (maps ? 290f : 10f)), GUIContent.none);
 
         float y = 10f;
@@ -637,101 +700,87 @@ public class SimplePlanetClouds : MonoBehaviour
 
         DrawMinimap(new Rect(10, y, 240, 240));
         GUI.Label(new Rect(10, y + 242, 240, 40),
-                  "жёлтое — патч, серое — его копии, белая точка — камера, красная линия — взгляд, голубое — горизонт",
-                  small);
+                  "в жёлтой рамке — патч, затемнено — его повторы, белая точка — камера, " +
+                  "красная линия — взгляд, голубое — горизонт", small);
 
-        if (_patchSource != null)
-        {
-            var r = new Rect(260, y, 380, 190);
-            GUI.DrawTexture(r, _patchSource, ScaleMode.StretchToFill, false);
-            DrawPatchOnPlanetMap(r);
-            GUI.Label(new Rect(260, y + 192, 380, 40),
-                      "карта облаков планеты: жёлтое — патч, белая точка — камера", small);
-        }
+        var r = new Rect(260, y, 380, 190);
+        GUI.DrawTexture(r, _patchSource, ScaleMode.StretchToFill, false);
+        DrawPatchOnPlanetMap(r);
+        GUI.Label(new Rect(260, y + 192, 380, 40),
+                  "карта облаков планеты: жёлтое — углы патча, белая точка — камера", small);
     }
 
     /// <summary>
-    /// Точка мира (x, z) → координаты мини-карты: центральный патч занимает от -0.5 до 0.5,
-    /// +X вправо, +Z вверх.
-    /// </summary>
-    Vector2 WorldXZToMinimap(float x, float z) => new Vector2(x / PatchSizeM, z / PatchSizeM);
-
-    /// <summary>
-    /// Мини-карта 3×3 патча: в центре настоящий патч (с жёлтой рамкой), вокруг — копии, которые HDRP
-    /// повторяет дальше. Поверх — камера, направление взгляда и круг горизонта.
-    /// Патч рисуется перевёрнутым по вертикали, чтобы +Z мира смотрел вверх (см. PatchPixelToWorldXZ).
+    /// Мини-карта вокруг камеры: камера в центре, +X мира вправо, +Z вверх.
+    /// Яркий квадрат в жёлтой рамке — patchSizeKm вокруг камеры, где объёмные облака совпадают
+    /// с картой; он едет вместе с камерой. Затемнено — где HDRP уже повторяет патч.
+    /// Поверх — направление взгляда и круг горизонта.
     /// </summary>
     void DrawMinimap(Rect r)
     {
-        float tile = r.width / 3f;
-        Color prev = GUI.color;
-        var flipped = new Rect(0f, 1f, 1f, -1f);
+        const float span = 1.5f;          // сколько патчей помещается по ширине мини-карты
+        float scale = r.width / span;     // пикселей экрана на один патч
+        Vector3 cam = player.position;
 
-        for (int ty = 0; ty < 3; ty++)
-            for (int tx = 0; tx < 3; tx++)
-            {
-                GUI.color = (tx == 1 && ty == 1) ? Color.white : new Color(0.45f, 0.45f, 0.45f);
-                GUI.DrawTextureWithTexCoords(new Rect(r.x + tx * tile, r.y + ty * tile, tile, tile), _patch, flipped);
-            }
-        GUI.color = prev;
-        RectOutline(new Rect(r.x + tile, r.y + tile, tile, tile), 2f, Color.yellow);
+        // Текстура патча повторяется, так что достаточно сдвинуть UV: левый край мини-карты —
+        // X камеры минус span/2 патча. По вертикали UV перевёрнут (см. RowZ): низ мини-карты —
+        // меньший Z мира, то есть больший V; отрицательная высота переворачивает картинку.
+        float uLeft = cam.x / PatchSizeM + 0.5f - span / 2f;
+        float vBottom = 0.5f - cam.z / PatchSizeM + span / 2f;
+        GUI.DrawTextureWithTexCoords(r, _patch, new Rect(uLeft, vBottom, span, -span));
 
-        // камера (экранный Y смотрит вниз, поэтому минус)
-        Vector2 m = WorldXZToMinimap(player.position.x, player.position.z);
-        Vector2 cam = new Vector2(r.center.x + m.x * tile, r.center.y - m.y * tile);
+        // затемнить всё, что за пределами патча
+        var inside = new Rect(r.center.x - scale / 2f, r.center.y - scale / 2f, scale, scale);
+        var shade = new Color(0f, 0f, 0f, 0.55f);
+        Fill(new Rect(r.x, r.y, r.width, inside.y - r.y), shade);
+        Fill(new Rect(r.x, inside.yMax, r.width, r.yMax - inside.yMax), shade);
+        Fill(new Rect(r.x, inside.y, inside.x - r.x, inside.height), shade);
+        Fill(new Rect(inside.xMax, inside.y, r.xMax - inside.xMax, inside.height), shade);
+        RectOutline(inside, 2f, Color.yellow);
 
         // горизонт
-        float horizon = _horizonKm / patchSizeKm * tile;
+        float horizon = _horizonKm / patchSizeKm * scale;
         for (int k = 0; k < 120; k++)
         {
             float a = k / 120f * Mathf.PI * 2f;
-            Vector2 q = cam + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * horizon;
+            Vector2 q = r.center + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * horizon;
             if (r.Contains(q)) Dot(q, 3, Color.cyan);
         }
 
-        // направление взгляда
+        // направление взгляда (экранный Y смотрит вниз, поэтому минус у Z)
         Vector3 forward = _cam != null ? _cam.transform.forward : player.forward;
         Vector2 look = new Vector2(forward.x, forward.z);
         if (look.sqrMagnitude > 1e-6f)
         {
             look.Normalize();
             for (int k = 2; k < 28; k += 2)
-            {
-                Vector2 q = cam + new Vector2(look.x, -look.y) * k;
-                if (r.Contains(q)) Dot(q, 3, Color.red);
-            }
+                Dot(r.center + new Vector2(look.x, -look.y) * k, 3, Color.red);
         }
 
-        if (r.Contains(cam)) Dot(cam, 8, Color.white);
-        else GUI.Label(new Rect(r.x + 4, r.y + 2, r.width, 20), "камера за пределами мини-карты");
+        Dot(r.center, 8, Color.white);
     }
 
     /// <summary>
-    /// На превью карты планеты отмечает, откуда вырезан патч (углы и центр — жёлтым)
-    /// и где сейчас камера (белым).
+    /// На превью карты планеты отмечает, откуда сейчас вырезан патч (его углы — жёлтым)
+    /// и где камера (белым).
     /// </summary>
     void DrawPatchOnPlanetMap(Rect r)
     {
-        Quaternion worldToMap = Quaternion.Inverse(MapRotation);
-        float shellRadius = (planetRadiusKm + shellAltitudeKm) * 1000f;
+        Vector2 ToScreen(Vector2 uv) => new Vector2(r.x + uv.x * r.width, r.y + (1f - uv.y) * r.height);
 
-        Vector2 ToScreen(Vector3 worldPoint)
-        {
-            Vector2 uv = DirToUV(worldToMap * (worldPoint - PlanetCenter).normalized);
-            return new Vector2(r.x + uv.x * r.width, r.y + (1f - uv.y) * r.height);
-        }
+        Vector3 cam = player.position;
+        float half = PatchSizeM / 2f;
+        foreach (var corner in new[] { new Vector2(-1, -1), new Vector2(1, -1), new Vector2(-1, 1), new Vector2(1, 1) })
+            Dot(ToScreen(MapUVAbove(cam.x + corner.x * half, cam.z + corner.y * half)), 5, Color.yellow);
+        Dot(ToScreen(MapUVAbove(cam.x, cam.z)), 7, Color.white);
+    }
 
-        Vector3 OverPatch(float u, float v)
-        {
-            Vector2 xz = PatchPixelToWorldXZ(u, v);
-            float y = Mathf.Sqrt(Mathf.Max(shellRadius * shellRadius - xz.x * xz.x - xz.y * xz.y, 0f));
-            return PlanetCenter + new Vector3(xz.x, y, xz.y);
-        }
-
-        foreach (var corner in new[] { new Vector2(0, 0), new Vector2(1, 0), new Vector2(0, 1), new Vector2(1, 1) })
-            Dot(ToScreen(OverPatch(corner.x, corner.y)), 5, Color.yellow);
-        Dot(ToScreen(OverPatch(0.5f, 0.5f)), 7, Color.yellow);
-        Dot(ToScreen(player.position), 7, Color.white);
+    static void Fill(Rect r, Color color)
+    {
+        Color prev = GUI.color;
+        GUI.color = color;
+        GUI.DrawTexture(r, Texture2D.whiteTexture);
+        GUI.color = prev;
     }
 
     static void Dot(Vector2 center, float size, Color color)
