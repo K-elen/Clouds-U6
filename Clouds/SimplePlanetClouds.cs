@@ -119,12 +119,19 @@ public class SimplePlanetClouds : MonoBehaviour
     // Больше HDRP не принимает (Cloud Map Resolution = Ultra 256×256).
     const int PatchResolution = 256;
 
+    // Во сколько раз Far Clip может быть больше Near Clip. Unity строит матрицу проекции во float,
+    // и при отношении больше ~10^7 дальняя плоскость встаёт куда попало, а потом пропадает совсем:
+    // сфера сначала «облезает» с краёв, потом исчезает. При 10^6 дальняя плоскость точно за горизонтом.
+    const float MaxFarToNear = 1e6f;
+
     bool _ready;                 // все ссылки на месте, можно работать
     VolumetricClouds _clouds;    // Volumetric Clouds из копии профиля skyVolume
     float _groundDensity;        // Density Multiplier из профиля — плотность облаков у земли
     Camera _cam;
     float _baseFarClip;          // Far Clip камеры до нас, вернём при выключении
+    float _baseNearClip;         // Near Clip камеры до нас, вернём при выключении
     float _farNeeded;            // какой Far Clip нужен, чтобы сфера была видна до горизонта
+    float _nearNeeded;           // какой Near Clip нужен, чтобы Far Clip не сломал точность
 
     GameObject _shell;
     Material _shellMat;          // копия shellMaterial, чтобы не менять ассет
@@ -176,7 +183,11 @@ public class SimplePlanetClouds : MonoBehaviour
         _cam = player.GetComponent<Camera>();
         if (_cam == null) _cam = Camera.main;
         if (_cam == null) Problem("камера не найдена — Far Clip не подстраивается, сфера может обрезаться");
-        else _baseFarClip = _cam.farClipPlane;
+        else
+        {
+            _baseFarClip = _cam.farClipPlane;
+            _baseNearClip = _cam.nearClipPlane;
+        }
 
         CheckVisualEnvironment();
         CreateShell();
@@ -186,13 +197,17 @@ public class SimplePlanetClouds : MonoBehaviour
 
     void OnEnable()
     {
-        RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
+        RenderPipelineManager.beginContextRendering += OnBeginContextRendering;
     }
 
     void OnDisable()
     {
-        RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
-        if (_cam != null && _baseFarClip > 0f) _cam.farClipPlane = _baseFarClip;
+        RenderPipelineManager.beginContextRendering -= OnBeginContextRendering;
+        if (_cam != null && _baseFarClip > 0f)
+        {
+            _cam.farClipPlane = _baseFarClip;
+            _cam.nearClipPlane = _baseNearClip;
+        }
     }
 
     void OnDestroy()
@@ -290,7 +305,7 @@ public class SimplePlanetClouds : MonoBehaviour
         UpdatePatch();
         UpdateVolumetricClouds();
         UpdateShell();
-        UpdateFarClip();
+        UpdateClipPlanes();
     }
 
     /// <summary>
@@ -323,11 +338,13 @@ public class SimplePlanetClouds : MonoBehaviour
     }
 
     /// <summary>
-    /// Сколько нужно Far Clip, чтобы сфера была видна до самого горизонта:
-    /// расстояние до касательной к сфере облаков плюс запас.
-    /// Само значение ставится перед рендером в OnBeginCameraRendering.
+    /// Какие Far Clip и Near Clip нужны камере на этой высоте.
+    /// Far Clip — чтобы сфера была видна до самого горизонта: расстояние до касательной к сфере облаков
+    /// плюс запас. Near Clip растёт вместе с ним (не меньше исходного), чтобы их отношение не превышало
+    /// MaxFarToNear: у земли Near остаётся прежним, на высоте 100 км — около метра, на 1600 км — около 5 м.
+    /// Сами значения ставятся перед рендером в OnBeginContextRendering.
     /// </summary>
-    void UpdateFarClip()
+    void UpdateClipPlanes()
     {
         if (_cam == null) return;
 
@@ -338,15 +355,20 @@ public class SimplePlanetClouds : MonoBehaviour
             : 0.0;
 
         _farNeeded = Mathf.Max(_baseFarClip, (float)(tangent * 1.1 + 20000.0));
+        _nearNeeded = Mathf.Max(_baseNearClip, _farNeeded / MaxFarToNear);
     }
 
     /// <summary>
-    /// Ставит Far Clip прямо перед рендером камеры — после всех Update и LateUpdate,
-    /// так что его не перебьёт никто (например, Cinemachine).
+    /// Ставит Far Clip и Near Clip в самом начале кадра рендера: после всех Update и LateUpdate
+    /// (их уже не перебьёт, например, Cinemachine), но до того, как HDRP построит по ним матрицу
+    /// проекции и отсечение. Событие камеры (beginCameraRendering) для этого не годится — HDRP
+    /// вызывает его, когда матрица уже посчитана.
     /// </summary>
-    void OnBeginCameraRendering(ScriptableRenderContext context, Camera cam)
+    void OnBeginContextRendering(ScriptableRenderContext context, List<Camera> cameras)
     {
-        if (cam == _cam && _farNeeded > 0f) cam.farClipPlane = _farNeeded;
+        if (_cam == null || _farNeeded <= 0f) return;
+        _cam.farClipPlane = _farNeeded;
+        _cam.nearClipPlane = _nearNeeded;
     }
 
     // ==================================================================
@@ -678,7 +700,8 @@ public class SimplePlanetClouds : MonoBehaviour
             lines.Add($"до горизонта ~{_horizonKm:F0} км" +
                       (_horizonKm > patchSizeKm / 2f && _transition < 0.999f
                           ? " — дальше края патча (затемнённое на мини-карте)" : ""));
-            if (_cam != null) lines.Add($"Far Clip {_cam.farClipPlane / 1000f:F0} км");
+            if (_cam != null)
+                lines.Add($"Far Clip {_cam.farClipPlane / 1000f:F0} км, Near Clip {_cam.nearClipPlane:F2} м");
         }
 
         float textHeight = 0f;
