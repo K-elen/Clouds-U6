@@ -29,7 +29,7 @@ Depth Write выкл, Receive Fog вкл, Preserve Specular Lighting выкл.
 | Vector4 | `_CloudErosion` | (107, 0.45, 200, 0) |
 | Vector4 | `_CloudCoverage` | (0.2, 1, 0.32, 0) |
 | Vector4 | `_CloudMisc` | (0, 0, 2000, 0.4) |
-| Vector2 | `_CloudFade` | (150000, 800000) |
+| Vector4 | `_CloudFade` | (150000, 800000, 1e12, 1e12) |
 
 Значения по умолчанию нужны только для превью: в игре скрипт выставляет их сам каждый кадр.
 
@@ -51,7 +51,7 @@ Depth Write выкл, Receive Fog вкл, Preserve Specular Lighting выкл.
 | Erosion | Vector4 |
 | Coverage | Vector4 |
 | Misc | Vector4 |
-| Fade | Vector2 |
+| Fade | Vector4 |
 | BaseColor | Vector4 |
 
 - **Outputs**: `Alpha`, Float.

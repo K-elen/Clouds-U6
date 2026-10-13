@@ -33,11 +33,12 @@ float CloudShellRemap(float x, float a)
 // Erosion  = Erosion Scale, сила эрозии, Micro Erosion Scale, сила микроэрозии (0 = выкл)
 // Coverage = порог покрытия, множитель покрытия, плотность, Shape Offset Y
 // Misc     = сдвиг от Altitude Distortion (xy), толщина слоя в метрах (z), степень покрытия coverageGamma (w)
-// Fade     = с какого расстояния детали гаснут, где пропадают совсем (метры)
+// Fade     = с какого расстояния детали гаснут (x) и где пропадают совсем (y);
+//            где кончаются объёмные облака HDRP: начало (z) и конец (w) перехода к сфере. Всё в метрах
 void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS, float3 PositionAWS,
                            UnityTexture3D ShapeNoise, UnityTexture3D ErosionNoise,
                            float4 Layer, float4 Shape, float4 Erosion, float4 Coverage, float4 Misc,
-                           float2 Fade, float4 BaseColor, out float Alpha)
+                           float4 Fade, float4 BaseColor, out float Alpha)
 {
     float A = SAMPLE_TEXTURE2D(CloudMap.tex, CloudMap.samplerstate, UV).a;
 
@@ -90,9 +91,14 @@ void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS
 
     // Вдали детали мельче пикселя — плавно переходим к карте как есть.
     // PositionWS в HDRP отсчитывается от камеры.
-    float fade = 1.0 - smoothstep(Fade.x, Fade.y, length(PositionWS));
+    float dist = length(PositionWS);
+    float fade = 1.0 - smoothstep(Fade.x, Fade.y, dist);
 
-    Alpha = saturate(lerp(A, detailed, fade)) * BaseColor.a;
+    // Сфера — дальний план объёмных облаков. Дальше того места, куда дотягиваются лучи HDRP,
+    // она видна полностью; ближе — только по мере перехода по высоте (альфа BaseColor).
+    float visibility = max(BaseColor.a, smoothstep(Fade.z, Fade.w, dist));
+
+    Alpha = saturate(lerp(A, detailed, fade)) * visibility;
 }
 
 #endif
