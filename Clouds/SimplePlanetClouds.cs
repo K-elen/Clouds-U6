@@ -17,10 +17,8 @@ using UnityEngine.Rendering.HighDefinition;
 /// шумом формы и эрозии, что и HDRP. Настройки этого шума скрипт каждый кадр переносит
 /// из Volumetric Clouds в материал сферы.
 ///
-/// Камера никуда не улетает: она всегда остаётся в начале координат, а все её перемещения скрипт
-/// переносит на планету — двигает центр планеты (Visual Environment, Center Mode = Manual), сферу
-/// облаков и всё содержимое планеты. Для HDRP это ровно то же самое, что полёт камеры: облака
-/// и атмосфера считаются от центра планеты. Зато вдали от старта нет дрожания из-за точности float.
+/// Радиус и центр планеты берутся из FloatingPlanet: он держит камеру в начале координат и двигает
+/// планету. Этот скрипт только следит, чтобы облака и сфера стояли там, где сейчас планета.
 ///
 /// Отладка: панель в левом верхнем углу — высота, переход, мини-карта вокруг камеры с патчем,
 /// направлением взгляда и горизонтом, и карта планеты с местом патча.
@@ -35,6 +33,9 @@ public class SimplePlanetClouds : MonoBehaviour
              "какой слой облаков виден.")]
     public Transform player;
 
+    [Tooltip("Планета (FloatingPlanet): её радиус и центр. Центр двигается, когда движется «камера».")]
+    public FloatingPlanet planet;
+
     [Tooltip("Volume, в профиле которого есть Volumetric Clouds (обычно Sky and Fog Volume). " +
              "Скрипт меняет копию профиля только на время игры, сам ассет не портится.")]
     public Volume skyVolume;
@@ -42,29 +43,6 @@ public class SimplePlanetClouds : MonoBehaviour
     [Tooltip("Материал облачной сферы: Shader Graph с CloudShellHDRP.hlsl. " +
              "В Base Color Map — текстура облаков всей планеты, облачность в альфа-канале.")]
     public Material shellMaterial;
-
-    [Header("Планета")]
-    [Tooltip("Радиус планеты, км. Скрипт сам ставит его в Planet Radius в Visual Environment " +
-             "(в HDRP по умолчанию 6378.1).")]
-    public float planetRadiusKm = 6378.1f;
-
-    [Tooltip("На какой высоте над землёй висит сфера с облаками, км.")]
-    public float shellAltitudeKm = 3f;
-
-    [Header("Камера стоит, движется планета")]
-    [Tooltip("Что двигает ваш контроллер: корень игрока или риг камеры. Каждый кадр скрипт возвращает его " +
-             "так, чтобы камера оказалась в начале координат, а сдвиг переносит на планету. " +
-             "Пусто — двигается сам player.")]
-    public Transform movingRoot;
-
-    [Tooltip("Корневой объект со всем, что стоит на планете: рельеф, постройки, объекты. " +
-             "Скрипт двигает его вместе с планетой. Пусто — на планете ничего нет, кроме неба и облаков.")]
-    public Transform planetContent;
-
-    [Tooltip("На сколько метров камере можно отойти от начала координат, прежде чем мир сдвинется. " +
-             "0 — каждый кадр, камера стоит на месте всегда. Больше 0 — реже, полезно, если на планете " +
-             "много физики: сдвиг статических коллайдеров каждый кадр стоит дорого.")]
-    [Min(0f)] public float recenterDistanceM = 0f;
 
     [Header("Переход между слоями")]
     [Tooltip("С этой высоты камеры, км, объёмные облака начинают гаснуть, а сфера — проявляться.")]
@@ -103,6 +81,9 @@ public class SimplePlanetClouds : MonoBehaviour
     [Range(0.2f, 1f)] public float coverageGamma = 0.4f;
 
     [Header("Сфера")]
+    [Tooltip("На какой высоте над землёй висит сфера с облаками, км.")]
+    public float shellAltitudeKm = 3f;
+
     [Tooltip("Цвет сферы. Если сфера светлее или темнее объёмных облаков — подберите здесь.")]
     public Color shellTint = Color.white;
 
@@ -175,16 +156,13 @@ public class SimplePlanetClouds : MonoBehaviour
     float _transition;           // 0 — только объёмные облака, 1 — только сфера
     float _volumetricReachM;     // докуда с этой высоты видны объёмные облака HDRP; дальше рисует сфера
 
-    VisualEnvironment _environment;   // Visual Environment из копии профиля skyVolume — в нём центр планеты
-
-    // Насколько камера на самом деле «улетела» от старта, метры. Хранится в double: на расстояниях
-    // в тысячи километров float теряет метры. Центр планеты — это старый центр минус этот сдвиг.
-    double _travelX, _travelY, _travelZ;
-
     readonly List<string> _problems = new List<string>();
 
-    /// <summary>Центр планеты в мире. В начале (0, -радиус, 0); дальше уезжает от камеры.</summary>
-    Vector3 PlanetCenter => new Vector3((float)-_travelX, (float)(-planetRadiusKm * 1000.0 - _travelY), (float)-_travelZ);
+    /// <summary>Центр планеты в мире — его двигает FloatingPlanet.</summary>
+    Vector3 PlanetCenter => planet.Center;
+
+    /// <summary>Радиус планеты, км — из FloatingPlanet.</summary>
+    float PlanetRadiusKm => planet.radiusKm;
 
     /// <summary>Камера в координатах планеты (от её центра) — в них HDRP читает карту облаков.</summary>
     Vector3 CameraPS => player.position - PlanetCenter;
@@ -195,9 +173,9 @@ public class SimplePlanetClouds : MonoBehaviour
 
     void Start()
     {
-        if (player == null || skyVolume == null || shellMaterial == null)
+        if (player == null || planet == null || skyVolume == null || shellMaterial == null)
         {
-            Problem("не заданы player, skyVolume или shellMaterial — скрипт не работает");
+            Problem("не заданы player, planet, skyVolume или shellMaterial — скрипт не работает");
             return;
         }
 
@@ -220,7 +198,6 @@ public class SimplePlanetClouds : MonoBehaviour
             _baseNearClip = _cam.nearClipPlane;
         }
 
-        SetupVisualEnvironment();
         CreateShell();
         SetupVolumetricClouds();
         _ready = true;
@@ -253,29 +230,6 @@ public class SimplePlanetClouds : MonoBehaviour
     {
         _problems.Add(message);
         Debug.LogWarning("[Clouds] " + message, this);
-    }
-
-    /// <summary>
-    /// Берёт Visual Environment из того же Volume (нет — добавляет) и переводит его на ручной центр
-    /// планеты: Rendering Space = World, Center Mode = Manual, радиус — planetRadiusKm.
-    /// Сам центр скрипт ставит каждый кадр (UpdateVisualEnvironment).
-    /// Если Visual Environment есть и в Volume с большим приоритетом — он может перебить эти значения.
-    /// </summary>
-    void SetupVisualEnvironment()
-    {
-        if (!skyVolume.profile.TryGet(out _environment))
-            _environment = skyVolume.profile.Add<VisualEnvironment>();
-
-        _environment.renderingSpace.Override(RenderingSpace.World);
-        _environment.centerMode.Override(VisualEnvironment.PlanetMode.Manual);
-        UpdateVisualEnvironment();
-    }
-
-    /// <summary>Центр и радиус планеты для HDRP. Visual Environment хранит их в километрах.</summary>
-    void UpdateVisualEnvironment()
-    {
-        _environment.planetRadius.Override(planetRadiusKm);
-        _environment.planetCenter.Override(PlanetCenter / 1000f);
     }
 
     /// <summary>
@@ -327,18 +281,15 @@ public class SimplePlanetClouds : MonoBehaviour
     // ==================================================================
     // Каждый кадр
 
-    // Всё в LateUpdate: к этому моменту контроллер игрока уже подвинул камеру за этот кадр,
-    // и мы сразу переносим это движение на планету.
+    // В LateUpdate: к этому моменту FloatingPlanet уже перенёс движение камеры за этот кадр на планету
+    // (он выполняется раньше остальных скриптов), и центр планеты — окончательный.
     void LateUpdate()
     {
         if (!_ready) return;
 
-        MoveWorldInsteadOfCamera();
-        UpdateVisualEnvironment();
-
         // высота над землёй и расстояние до горизонта
-        _altitudeKm = Vector3.Distance(player.position, PlanetCenter) / 1000f - planetRadiusKm;
-        double r = planetRadiusKm, h = r + System.Math.Max(_altitudeKm, 0f);
+        _altitudeKm = Vector3.Distance(player.position, PlanetCenter) / 1000f - PlanetRadiusKm;
+        double r = PlanetRadiusKm, h = r + System.Math.Max(_altitudeKm, 0f);
         _horizonKm = (float)System.Math.Sqrt(h * h - r * r);
 
         // 0 ниже fadeStartKm, 1 выше fadeEndKm, плавно между ними
@@ -349,31 +300,6 @@ public class SimplePlanetClouds : MonoBehaviour
         UpdateVolumetricClouds();
         UpdateShell();
         UpdateClipPlanes();
-    }
-
-    /// <summary>
-    /// Возвращает камеру в начало координат, а её сдвиг переносит на планету: запоминает его
-    /// в _travel (из него считается PlanetCenter) и сдвигает на столько же содержимое планеты.
-    /// Для глаза и для HDRP ничего не меняется — всё вокруг камеры остаётся на своих местах
-    /// относительно неё. Двигается movingRoot (или сам player), так что работает с любым контроллером.
-    /// </summary>
-    void MoveWorldInsteadOfCamera()
-    {
-        Vector3 shift = player.position;   // где камера сейчас; должна быть в (0, 0, 0)
-        if (shift == Vector3.zero || shift.sqrMagnitude < recenterDistanceM * recenterDistanceM) return;
-
-        Transform root = movingRoot != null ? movingRoot : player;
-        root.position -= shift;
-        var body = root.GetComponent<Rigidbody>();
-        if (body != null) body.position -= shift;   // физическое тело двигаем вместе с трансформом
-
-        if (planetContent != null) planetContent.position -= shift;
-
-        Physics.SyncTransforms();   // чтобы CharacterController и коллайдеры сразу узнали новые позиции
-
-        _travelX += shift.x;
-        _travelY += shift.y;
-        _travelZ += shift.z;
     }
 
     /// <summary>
@@ -402,7 +328,7 @@ public class SimplePlanetClouds : MonoBehaviour
         tint.a = _transition;
         _shellMat.SetColor("_BaseColor", tint);
         _shell.transform.position = PlanetCenter;
-        _shell.transform.localScale = Vector3.one * (planetRadiusKm + shellAltitudeKm) * 1000f;
+        _shell.transform.localScale = Vector3.one * (PlanetRadiusKm + shellAltitudeKm) * 1000f;
         _shell.SetActive(_transition > 0.001f || !float.IsInfinity(_volumetricReachM));
 
         UpdateShellDetail();
@@ -418,7 +344,7 @@ public class SimplePlanetClouds : MonoBehaviour
     /// </summary>
     float VolumetricReachM()
     {
-        double r = planetRadiusKm * 1000.0;
+        double r = PlanetRadiusKm * 1000.0;
         double bottom = r + _clouds.bottomAltitude.value;
         double range = _clouds.altitudeRange.value;
         double top = bottom + range;
@@ -458,7 +384,7 @@ public class SimplePlanetClouds : MonoBehaviour
         if (_cam == null) return;
 
         double camDist = Vector3.Distance(_cam.transform.position, PlanetCenter);
-        double shellRadius = (planetRadiusKm + shellAltitudeKm) * 1000.0;
+        double shellRadius = (PlanetRadiusKm + shellAltitudeKm) * 1000.0;
         double tangent = camDist > shellRadius
             ? System.Math.Sqrt(camDist * camDist - shellRadius * shellRadius)
             : 0.0;
@@ -502,7 +428,7 @@ public class SimplePlanetClouds : MonoBehaviour
     {
         double mid = _clouds.bottomAltitude.value + _clouds.altitudeRange.value * 0.5;
         double k = HdrpEarthRadiusM + mid;
-        return (float)System.Math.Sqrt(System.Math.Max(k * k - HdrpEarthRadiusM * planetRadiusKm * 1000.0, 1.0));
+        return (float)System.Math.Sqrt(System.Math.Max(k * k - HdrpEarthRadiusM * PlanetRadiusKm * 1000.0, 1.0));
     }
 
     /// <summary>
@@ -531,7 +457,7 @@ public class SimplePlanetClouds : MonoBehaviour
     /// </summary>
     Vector2 MapUVAbove(float x, float z)
     {
-        float r = (planetRadiusKm + shellAltitudeKm) * 1000f;
+        float r = (PlanetRadiusKm + shellAltitudeKm) * 1000f;
         float y = Mathf.Sqrt(Mathf.Max(r * r - x * x - z * z, 0f));
         return DirToUV(_worldToMap * new Vector3(x, y, z).normalized);
     }
@@ -544,7 +470,7 @@ public class SimplePlanetClouds : MonoBehaviour
     void UpdatePatch()
     {
         string key = $"{startLatitude}|{startLongitude}|{patchSizeKm}|{coverageThreshold}|{coverageMultiplier}|" +
-                     $"{coverageGamma}|{planetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}";
+                     $"{coverageGamma}|{PlanetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}";
         if (key != _patchKey)
         {
             _patchKey = key;
@@ -644,7 +570,7 @@ public class SimplePlanetClouds : MonoBehaviour
         // слой облаков: центр планеты и радиус нижней границы слоя
         Vector3 c = PlanetCenter;
         _shellMat.SetVector("_CloudLayer", new Vector4(c.x, c.y, c.z,
-                                                       planetRadiusKm * 1000f + _clouds.bottomAltitude.value));
+                                                       PlanetRadiusKm * 1000f + _clouds.bottomAltitude.value));
 
         // форма: Shape Scale, Shape Factor, Shape Offset
         Vector3 offset = _clouds.shapeOffset.value;
@@ -808,10 +734,10 @@ public class SimplePlanetClouds : MonoBehaviour
             lines.Add($"высота {_altitudeKm:F1} км   переход {_transition * 100f:F0}%   " +
                       (_transition <= 0.001f ? "(только объёмные)" : _transition >= 0.999f ? "(только сфера)" : "(оба слоя)"));
             if (_altitudeKm < -1f)
-                lines.Add("<color=#ffb060>! высота отрицательная — planetRadiusKm не совпадает с Planet Radius?</color>");
+                lines.Add("<color=#ffb060>! высота отрицательная — камера под землёй или радиус планеты задан неверно?</color>");
 
-            lines.Add($"камера в начале координат, пролетели от старта: " +
-                      $"X {_travelX / 1000.0:F1} км, Y {_travelY / 1000.0:F1} км, Z {_travelZ / 1000.0:F1} км");
+            Vector3 travel = planet.TravelKm;
+            lines.Add($"пролетели от старта: X {travel.x:F1} км, Y {travel.y:F1} км, Z {travel.z:F1} км");
             lines.Add($"патч {patchSizeKm:F0} км вокруг камеры, пиксель {patchSizeKm / PatchResolution:F1} км");
             if (!float.IsInfinity(_volumetricReachM))
                 lines.Add($"объёмные облака видны до ~{_volumetricReachM / 1000f:F0} км, дальше их продолжает сфера");
