@@ -9,15 +9,14 @@ using UnityEngine.InputSystem;
 // камеры весь мир нельзя. Точности поворот камеры не вредит — вредит только большое расстояние.
 public class PlanetFlyController : MonoBehaviour
 {
-    [Tooltip("Планета, которую двигаем. Пусто — найдётся в сцене сама.")]
-    public FloatingPlanet planet;
+    FloatingPlanet planet;   // находится в сцене сама
 
     float speed = 20f;
     float yaw, pitch;
 
     void Start()
     {
-        if (planet == null) planet = FindFirstObjectByType<FloatingPlanet>();
+        planet = FindFirstObjectByType<FloatingPlanet>();
         if (planet == null) Debug.LogWarning("[PlanetFlyController] в сцене нет FloatingPlanet — лететь нечем", this);
 
         // берём текущий поворот камеры, чтобы при запуске ничего не дёрнулось

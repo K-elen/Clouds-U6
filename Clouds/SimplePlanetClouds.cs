@@ -29,18 +29,7 @@ public class SimplePlanetClouds : MonoBehaviour
     // ==================================================================
     // Настройки
 
-    [Header("Ссылки")]
-    [Tooltip("Камера игрока (объект с компонентом Camera). От её высоты над землёй зависит, " +
-             "какой слой облаков виден.")]
-    public Transform player;
-
-    [Tooltip("Планета (FloatingPlanet): её радиус и центр. Центр двигается, когда движется «камера».")]
-    public FloatingPlanet planet;
-
-    [Tooltip("Volume, в профиле которого есть Volumetric Clouds (обычно Sky and Fog Volume). " +
-             "Скрипт меняет копию профиля только на время игры, сам ассет не портится.")]
-    public Volume skyVolume;
-
+    [Header("Материал")]
     [Tooltip("Материал облачной сферы: Shader Graph с CloudShellHDRP.hlsl. " +
              "В Base Color Map — текстура облаков всей планеты, облачность в альфа-канале.")]
     public Material shellMaterial;
@@ -127,7 +116,9 @@ public class SimplePlanetClouds : MonoBehaviour
     const float MaxFarToNear = 1e6f;
 
     bool _ready;                 // все ссылки на месте, можно работать
-    VolumetricClouds _clouds;    // Volumetric Clouds из копии профиля skyVolume
+    FloatingPlanet planet;       // планета: радиус, центр, поворот и Volume с облаками — находится в сцене
+    Transform player;            // камера (Camera.main); стоит в начале координат, планета движется вокруг
+    VolumetricClouds _clouds;    // Volumetric Clouds из копии профиля planet.SkyVolume
     float _groundDensity;        // Density Multiplier из профиля — плотность облаков у земли
     Camera _cam;
     float _baseFarClip;          // Far Clip камеры до нас, вернём при выключении
@@ -174,15 +165,19 @@ public class SimplePlanetClouds : MonoBehaviour
 
     void Start()
     {
-        if (player == null || planet == null || skyVolume == null || shellMaterial == null)
+        planet = FindFirstObjectByType<FloatingPlanet>();
+        _cam = Camera.main;
+        if (shellMaterial == null || planet == null || _cam == null)
         {
-            Problem("не заданы player, planet, skyVolume или shellMaterial — скрипт не работает");
+            Problem("нужны материал сферы (shellMaterial), FloatingPlanet в сцене и камера с тегом MainCamera — " +
+                    "скрипт не работает");
             return;
         }
+        player = _cam.transform;
 
-        if (!skyVolume.profile.TryGet(out _clouds))   // .profile — копия на время игры
+        if (planet.SkyVolume == null || !planet.SkyVolume.profile.TryGet(out _clouds))   // .profile — копия
         {
-            Problem("в профиле skyVolume нет Volumetric Clouds — скрипт не работает");
+            Problem("в сцене нет Volume с Volumetric Clouds — скрипт не работает");
             return;
         }
 
@@ -190,14 +185,8 @@ public class SimplePlanetClouds : MonoBehaviour
         if (_groundDensity < 0.01f)
             Problem("Density Multiplier в Volumetric Clouds равен 0 — объёмных облаков не будет видно");
 
-        _cam = player.GetComponent<Camera>();
-        if (_cam == null) _cam = Camera.main;
-        if (_cam == null) Problem("камера не найдена — Far Clip не подстраивается, сфера может обрезаться");
-        else
-        {
-            _baseFarClip = _cam.farClipPlane;
-            _baseNearClip = _cam.nearClipPlane;
-        }
+        _baseFarClip = _cam.farClipPlane;
+        _baseNearClip = _cam.nearClipPlane;
 
         CreateShell();
         SetupVolumetricClouds();
@@ -855,7 +844,7 @@ public class SimplePlanetClouds : MonoBehaviour
         }
 
         // направление взгляда (экранный Y смотрит вниз, поэтому минус у Z)
-        Vector3 forward = _cam != null ? _cam.transform.forward : player.forward;
+        Vector3 forward = player.forward;
         Vector2 look = new Vector2(forward.x, forward.z);
         if (look.sqrMagnitude > 1e-6f)
         {

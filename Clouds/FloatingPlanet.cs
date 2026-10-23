@@ -11,8 +11,9 @@ using UnityEngine.Rendering.HighDefinition;
 ///  - по горизонтали — планета поворачивается вокруг своего центра, подставляя под камеру новое место.
 ///    Так можно облететь весь шар; солнце при этом само оказывается в другом месте неба.
 ///
-/// Fly вызывает контроллер (PlanetFlyController). Если вместо него камеру двигает обычный контроллер,
-/// этот скрипт сам в конце кадра вернёт камеру в начало координат и превратит её сдвиг в Fly.
+/// Fly вызывает контроллер (PlanetFlyController). Сама камера должна стоять в начале координат.
+///
+/// Ссылок задавать не нужно: Volume с облаками и Visual Environment скрипт находит в сцене сам.
 ///
 /// Для HDRP центр планеты задаётся в Visual Environment (Center Mode = Manual). Повороты планеты HDRP
 /// не знает — объёмные облака под поворот подстраивает SimplePlanetClouds по PlanarTravel.
@@ -28,25 +29,9 @@ public class FloatingPlanet : MonoBehaviour
              "(в HDRP по умолчанию 6378.1).")]
     public float radiusKm = 6378.1f;
 
-    [Tooltip("Volume с Visual Environment (обычно Sky and Fog Volume). Если Visual Environment в нём нет — " +
-             "скрипт добавит его в копию профиля на время игры, сам ассет не меняется.")]
-    public Volume skyVolume;
-
     [Tooltip("Корневой объект со всем, что стоит на планете: рельеф, постройки, объекты. " +
              "Он едет и поворачивается вместе с планетой. Пусто — на планете нет ничего, кроме неба и облаков.")]
     public Transform planetContent;
-
-    [Header("Камера")]
-    [Tooltip("Камера, которая всегда стоит в начале координат. Пусто — Camera.main.")]
-    public Transform cameraTransform;
-
-    [Tooltip("Только если камеру двигает обычный контроллер: что именно он двигает (корень игрока " +
-             "или риг камеры). Скрипт вернёт это назад, а сдвиг передаст планете. Пусто — сама камера.")]
-    public Transform movingRoot;
-
-    [Tooltip("Только для обычного контроллера: на сколько метров камере можно отойти от начала координат, " +
-             "прежде чем сдвиг перейдёт на планету. 0 — каждый кадр.")]
-    [Min(0f)] public float recenterDistanceM = 0f;
 
     // ==================================================================
     // Состояние
@@ -55,9 +40,15 @@ public class FloatingPlanet : MonoBehaviour
     double _planarX, _planarZ;           // пройдено по горизонтали — как по плоской карте, в осях мира
     Quaternion _rotation = Quaternion.identity;   // поворот планеты от начального положения
 
-    VisualEnvironment _environment;      // из копии профиля skyVolume
+    VisualEnvironment _environment;      // из копии профиля SkyVolume
     Vector3 _contentOffset;              // где planetContent стоял относительно центра планеты в начале
     Quaternion _contentRotation;         // и как был повёрнут
+
+    /// <summary>
+    /// Volume с Volumetric Clouds (обычно Sky and Fog Volume) — найден в сцене сам. В нём же скрипт
+    /// держит Visual Environment. Профиль меняется только в копии на время игры.
+    /// </summary>
+    public Volume SkyVolume { get; private set; }
 
     /// <summary>Центр планеты в мире, метры. Всегда прямо под камерой; в начале — (0, -радиус, 0).</summary>
     public Vector3 Center => new Vector3(0f, (float)(-radiusKm * 1000.0 - _altitudeShiftM), 0f);
@@ -78,14 +69,23 @@ public class FloatingPlanet : MonoBehaviour
 
     // ==================================================================
 
-    void Start()
+    // Awake, а не Start: SkyVolume нужен другим скриптам уже в их Start.
+    void Awake()
     {
-        if (cameraTransform == null && Camera.main != null) cameraTransform = Camera.main.transform;
+        SkyVolume = FindSkyVolume();
 
         if (planetContent != null)
         {
             _contentOffset = planetContent.position - Center;
             _contentRotation = planetContent.rotation;
+        }
+
+        // Камера стоит в сцене не в начале координат — переносим её туда, а её место «долетаем» планетой.
+        var cam = Camera.main;
+        if (cam != null && cam.transform.position != Vector3.zero)
+        {
+            Fly(cam.transform.position);
+            cam.transform.position = Vector3.zero;
         }
 
         SetupVisualEnvironment();
@@ -94,7 +94,6 @@ public class FloatingPlanet : MonoBehaviour
     // В LateUpdate: контроллер уже сделал свой ход за этот кадр, а рендер ещё не начался.
     void LateUpdate()
     {
-        TakeOverCameraMovement();
         PlaceContent();
         UpdateVisualEnvironment();
     }
@@ -127,25 +126,6 @@ public class FloatingPlanet : MonoBehaviour
     }
 
     /// <summary>
-    /// Для обычного контроллера, который двигает саму камеру: возвращает камеру в начало координат
-    /// и передаёт её сдвиг в Fly. Двигается movingRoot (или сама камера) и её Rigidbody, если он есть.
-    /// </summary>
-    void TakeOverCameraMovement()
-    {
-        if (cameraTransform == null) return;
-
-        Vector3 shift = cameraTransform.position;   // где камера сейчас; должна быть в (0, 0, 0)
-        if (shift == Vector3.zero || shift.sqrMagnitude < recenterDistanceM * recenterDistanceM) return;
-
-        Transform root = movingRoot != null ? movingRoot : cameraTransform;
-        root.position -= shift;
-        var body = root.GetComponent<Rigidbody>();
-        if (body != null) body.position -= shift;
-
-        Fly(shift);
-    }
-
-    /// <summary>
     /// Ставит всё содержимое планеты туда, где сейчас планета: то же положение относительно её центра,
     /// повёрнутое вместе с ней. Считается от начального положения, поэтому ошибки не накапливаются.
     /// </summary>
@@ -157,24 +137,39 @@ public class FloatingPlanet : MonoBehaviour
     }
 
     /// <summary>
-    /// Берёт Visual Environment из skyVolume (нет — добавляет) и переводит его на ручной центр планеты:
+    /// Берёт Visual Environment из SkyVolume (нет — добавляет) и переводит его на ручной центр планеты:
     /// Rendering Space = World, Center Mode = Manual. Радиус и центр ставятся каждый кадр.
-    /// Если Visual Environment есть и в Volume с большим приоритетом — он может перебить эти значения.
+    /// Если Visual Environment есть ещё в одном Volume с большим приоритетом — он может перебить эти значения.
     /// </summary>
     void SetupVisualEnvironment()
     {
-        if (skyVolume == null)
+        if (SkyVolume == null)
         {
-            Debug.LogWarning("[FloatingPlanet] не задан skyVolume — HDRP не узнает, где центр планеты", this);
+            Debug.LogWarning("[FloatingPlanet] в сцене нет Volume с Volumetric Clouds — " +
+                             "HDRP не узнает, где центр планеты", this);
             return;
         }
 
-        if (!skyVolume.profile.TryGet(out _environment))   // .profile — копия на время игры
-            _environment = skyVolume.profile.Add<VisualEnvironment>();
+        if (!SkyVolume.profile.TryGet(out _environment))   // .profile — копия на время игры
+            _environment = SkyVolume.profile.Add<VisualEnvironment>();
 
         _environment.renderingSpace.Override(RenderingSpace.World);
         _environment.centerMode.Override(VisualEnvironment.PlanetMode.Manual);
         UpdateVisualEnvironment();
+    }
+
+    /// <summary>
+    /// Ищет в сцене Volume, в профиле которого есть Volumetric Clouds. Если таких несколько —
+    /// берёт с наибольшим приоритетом (он и побеждает при смешивании).
+    /// </summary>
+    static Volume FindSkyVolume()
+    {
+        Volume best = null;
+        foreach (var v in FindObjectsByType<Volume>(FindObjectsSortMode.None))
+            if (v.sharedProfile != null && v.sharedProfile.Has<VolumetricClouds>() &&
+                (best == null || v.priority > best.priority))
+                best = v;
+        return best;
     }
 
     /// <summary>Центр и радиус планеты для HDRP. Visual Environment хранит их в километрах.</summary>
