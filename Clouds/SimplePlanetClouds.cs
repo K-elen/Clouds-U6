@@ -17,8 +17,9 @@ using UnityEngine.Rendering.HighDefinition;
 /// шумом формы и эрозии, что и HDRP. Настройки этого шума скрипт каждый кадр переносит
 /// из Volumetric Clouds в материал сферы.
 ///
-/// Радиус и центр планеты берутся из FloatingPlanet: он держит камеру в начале координат и двигает
-/// планету. Этот скрипт только следит, чтобы облака и сфера стояли там, где сейчас планета.
+/// Радиус, центр и поворот планеты берутся из FloatingPlanet: он держит камеру в начале координат,
+/// а планету отодвигает и поворачивает. Этот скрипт ставит сферу облаков туда, где сейчас планета,
+/// и сдвигает карту и шум объёмных облаков HDRP вслед за её поворотом (FollowPlanetInHdrp).
 ///
 /// Отладка: панель в левом верхнем углу — высота, переход, мини-карта вокруг камеры с патчем,
 /// направлением взгляда и горизонтом, и карта планеты с местом патча.
@@ -141,6 +142,8 @@ public class SimplePlanetClouds : MonoBehaviour
     Color32[] _patchPixels;      // её содержимое; перерисовываются только устаревшие строки и столбцы
     Texture2D _patchSource;      // карта облаков планеты, из которой режется патч
     Quaternion _worldToMap;      // поворот из осей мира в оси карты (обратный к повороту сферы)
+    Vector3 _baseShapeOffset;    // Shape Offset из профиля — к нему прибавляется сдвиг за пройденный путь
+    double _lastPlanarX, _lastPlanarZ;   // путь планеты на прошлом кадре — чтобы знать путь за кадр
     string _patchKey;            // настройки, с которыми собран патч; изменились — собираем заново
     string _patchError;          // почему патч не собирается
 
@@ -164,8 +167,6 @@ public class SimplePlanetClouds : MonoBehaviour
     /// <summary>Радиус планеты, км — из FloatingPlanet.</summary>
     float PlanetRadiusKm => planet.radiusKm;
 
-    /// <summary>Камера в координатах планеты (от её центра) — в них HDRP читает карту облаков.</summary>
-    Vector3 CameraPS => player.position - PlanetCenter;
     float PatchSizeM => patchSizeKm * 1000f;
 
     // ==================================================================
@@ -275,6 +276,19 @@ public class SimplePlanetClouds : MonoBehaviour
                       "вместо него используйте coverageMultiplier", this);
         _clouds.cumulusMapMultiplier.Override(1f);
 
+        // Карту и шум формы сдвигаем сами (FollowPlanetInHdrp), шум эрозии — ветром. Поэтому у ветра
+        // остаётся только эрозия, а Altitude Distortion выключен: он смещает шум по направлению ветра,
+        // и облака дёргались бы при каждом повороте.
+        _baseShapeOffset = _clouds.shapeOffset.value;
+        _clouds.cloudMapSpeedMultiplier.Override(0f);
+        _clouds.shapeSpeedMultiplier.Override(0f);
+        _clouds.erosionSpeedMultiplier.Override(1f);
+        _clouds.verticalShapeWindSpeed.Override(0f);
+        _clouds.verticalErosionWindSpeed.Override(0f);
+        _clouds.altitudeDistortion.Override(0f);
+        _lastPlanarX = planet.PlanarX;
+        _lastPlanarZ = planet.PlanarZ;
+
         UpdatePatch();
     }
 
@@ -314,7 +328,45 @@ public class SimplePlanetClouds : MonoBehaviour
 
         float tiling = HdrpCloudMapSizeM() / PatchSizeM;
         _clouds.cloudTiling.Override(new Vector2(tiling, tiling));
+
+        FollowPlanetInHdrp();
     }
+
+    /// <summary>
+    /// HDRP не знает, что планета поворачивается: карта и шум его облаков лежат в осях мира, а камера
+    /// стоит на месте. Чтобы объёмные облака ехали вместе с планетой, сдвигаем их на путь,
+    /// пройденный по горизонтали (planet.PlanarX/Z), — для HDRP это как будто камера пролетела его сама:
+    ///  - карту облаков — через Cloud Offset (в долях карты, она повторяется через patchSizeKm);
+    ///  - шум формы — через Shape Offset (в долях текстуры шума, плюс поправка на y += x/3 + z/7,
+    ///    которую HDRP добавляет к координатам этого шума);
+    ///  - шум эрозии — ветром: своего сдвига у него нет, а ветер HDRP каждый кадр прибавляет к сдвигу
+    ///    −Δt · 0.2778 · скорость · направление. Подбираем скорость и направление так, чтобы прибавка
+    ///    была ровно путём за кадр. Свой ветер у облаков поэтому не работает.
+    /// Дробная часть берётся, чтобы числа не росли: текстуры повторяются через 1.
+    /// </summary>
+    void FollowPlanetInHdrp()
+    {
+        double px = planet.PlanarX, pz = planet.PlanarZ;
+
+        _clouds.cloudOffset.Override(new Vector2(Frac(px / PatchSizeM), Frac(pz / PatchSizeM)));
+
+        double k = _clouds.shapeScale.value / 100000.0;   // метры → доли текстуры шума формы
+        _clouds.shapeOffset.Override(_baseShapeOffset + new Vector3(
+            Frac(-px * k), Frac(-(px / 3.0 + pz / 7.0) * k), Frac(-pz * k)));
+
+        double dx = px - _lastPlanarX, dz = pz - _lastPlanarZ;
+        _lastPlanarX = px;
+        _lastPlanarZ = pz;
+        float dt = Time.deltaTime;
+        float speedKmh = dt > 0f ? (float)(System.Math.Sqrt(dx * dx + dz * dz) / (dt * 0.277778)) : 0f;
+        float directionDeg = (float)(System.Math.Atan2(-dz, -dx) * (180.0 / System.Math.PI));
+        _clouds.globalWindSpeed.Override(new WindParameter.WindParamaterValue
+            { mode = WindParameter.WindOverrideMode.Custom, customValue = speedKmh });
+        _clouds.orientation.Override(new WindParameter.WindParamaterValue
+            { mode = WindParameter.WindOverrideMode.Custom, customValue = Mathf.Repeat(directionDeg, 360f) });
+    }
+
+    static float Frac(double v) => (float)(v - System.Math.Floor(v));
 
     /// <summary>
     /// Сфера проявляется по мере перехода (альфа в _BaseColor). Кроме того, когда камера над облаками,
@@ -327,7 +379,7 @@ public class SimplePlanetClouds : MonoBehaviour
         Color tint = shellTint;
         tint.a = _transition;
         _shellMat.SetColor("_BaseColor", tint);
-        _shell.transform.position = PlanetCenter;
+        _shell.transform.SetPositionAndRotation(PlanetCenter, planet.Rotation * MapRotation);
         _shell.transform.localScale = Vector3.one * (PlanetRadiusKm + shellAltitudeKm) * 1000f;
         _shell.SetActive(_transition > 0.001f || !float.IsInfinity(_volumetricReachM));
 
@@ -452,8 +504,9 @@ public class SimplePlanetClouds : MonoBehaviour
                   coverageGamma);
 
     /// <summary>
-    /// UV карты облаков над точкой мира (x, z): берём точку сферы облаков прямо над ней
-    /// и переводим её направление в оси карты.
+    /// UV карты облаков над местом (x, z) — метры по горизонтали от камеры: берём точку сферы облаков
+    /// прямо над ним (центр планеты под камерой) и переводим её направление в оси карты с учётом
+    /// того, как сейчас повёрнута планета.
     /// </summary>
     Vector2 MapUVAbove(float x, float z)
     {
@@ -474,19 +527,19 @@ public class SimplePlanetClouds : MonoBehaviour
         if (key != _patchKey)
         {
             _patchKey = key;
-            _shell.transform.rotation = MapRotation;   // широта и долгота старта могли поменяться
-            _worldToMap = Quaternion.Inverse(MapRotation);
             _patchError = PreparePatch();
             if (_patchError != null) Debug.LogWarning("[Clouds] " + _patchError, this);
 
             // «ни одна копия ещё не нарисована» — ниже перерисуется весь патч
             for (int n = 0; n < PatchResolution; n++) _columnCopy[n] = _rowCopy[n] = int.MinValue;
         }
+        _worldToMap = Quaternion.Inverse(planet.Rotation * MapRotation);   // планета могла повернуться
         if (_patchError != null) return;
 
-        Vector3 cam = CameraPS;   // HDRP читает карту облаков в координатах планеты
-        bool anyColumn = PickNearestCopies(_columnCopy, _columnDirty, cam.x, true);
-        bool anyRow = PickNearestCopies(_rowCopy, _rowDirty, cam.z, false);
+        // HDRP читает карту так, будто камера пролетела по плоской карте путь planet.PlanarX/Z
+        // (см. FollowPlanetInHdrp), — вокруг этой точки патч и держим
+        bool anyColumn = PickNearestCopies(_columnCopy, _columnDirty, (float)planet.PlanarX, true);
+        bool anyRow = PickNearestCopies(_rowCopy, _rowDirty, (float)planet.PlanarZ, false);
         if (!anyColumn && !anyRow) return;
 
         for (int j = 0; j < PatchResolution; j++)
@@ -522,8 +575,9 @@ public class SimplePlanetClouds : MonoBehaviour
     /// </summary>
     Color32 PatchPixel(int i, int j)
     {
-        float x = ColumnX(i) + _columnCopy[i] * PatchSizeM;
-        float z = RowZ(j) + _rowCopy[j] * PatchSizeM;
+        // место на плоской карте минус путь камеры — это место относительно камеры
+        float x = (float)(ColumnX(i) + (double)_columnCopy[i] * PatchSizeM - planet.PlanarX);
+        float z = (float)(RowZ(j) + (double)_rowCopy[j] * PatchSizeM - planet.PlanarZ);
         Vector2 uv = MapUVAbove(x, z);
         byte c = (byte)(Coverage(_patchSource.GetPixelBilinear(uv.x, uv.y).a) * 255f);
         return new Color32(c, c, c, 255);
@@ -593,11 +647,10 @@ public class SimplePlanetClouds : MonoBehaviour
         _shellMat.SetVector("_CloudCoverage", new Vector4(
             coverageThreshold, coverageMultiplier, _groundDensity * _groundDensity * 2f * shellOpacity, offset.y));
 
-        // Altitude Distortion (в шейдере умножается на высоту в слое), толщина слоя, степень покрытия
-        float theta = WindOrientationDeg() * Mathf.Deg2Rad;
-        Vector2 distortion = new Vector2(-Mathf.Cos(theta), -Mathf.Sin(theta)) * (_clouds.altitudeDistortion.value * 0.25f);
-        _shellMat.SetVector("_CloudMisc", new Vector4(distortion.x, distortion.y,
-                                                      _clouds.altitudeRange.value, coverageGamma));
+        // сдвиг шума эрозии на пройденный путь (как ветер у HDRP, см. FollowPlanetInHdrp; по модулю
+        // 10 000 км, чтобы хватило точности float), толщина слоя, степень покрытия
+        _shellMat.SetVector("_CloudMisc", new Vector4(
+            (float)(planet.PlanarX % 1e7), (float)(planet.PlanarZ % 1e7), _clouds.altitudeRange.value, coverageGamma));
 
         // Где детали гаснут, и где сфера подхватывает облака у границы объёмных (последние 15% пути до неё).
         // Граница не дальше половины патча: дальше объёмные облака повторяют патч, а не карту.
@@ -605,19 +658,6 @@ public class SimplePlanetClouds : MonoBehaviour
         if (float.IsInfinity(_volumetricReachM)) reach = 1e12f;
         _shellMat.SetVector("_CloudFade", new Vector4(detailFadeStartKm * 1000f, detailFadeEndKm * 1000f,
                                                       reach * 0.85f, reach));
-    }
-
-    /// <summary>
-    /// Направление ветра облаков в градусах — как WindOrientationParameter.GetValue в HDRP, но без HDCamera:
-    /// значение Global берётся из Visual Environment того же skyVolume (нет его там — 0).
-    /// </summary>
-    float WindOrientationDeg()
-    {
-        var wind = _clouds.orientation.value;
-        if (wind.mode == WindParameter.WindOverrideMode.Custom) return wind.customValue;
-
-        float global = skyVolume.profile.TryGet(out VisualEnvironment env) ? env.windOrientation.value : 0f;
-        return wind.mode == WindParameter.WindOverrideMode.Additive ? global + wind.additiveValue : global;
     }
 
 #if UNITY_EDITOR
@@ -787,13 +827,13 @@ public class SimplePlanetClouds : MonoBehaviour
     {
         const float span = 1.5f;          // сколько патчей помещается по ширине мини-карты
         float scale = r.width / span;     // пикселей экрана на один патч
-        Vector3 cam = CameraPS;
+        var cam = new Vector2((float)planet.PlanarX, (float)planet.PlanarZ);   // где камера на плоской карте
 
         // Текстура патча повторяется, так что достаточно сдвинуть UV: левый край мини-карты —
         // X камеры минус span/2 патча. По вертикали UV перевёрнут (см. RowZ): низ мини-карты —
         // меньший Z мира, то есть больший V; отрицательная высота переворачивает картинку.
         float uLeft = cam.x / PatchSizeM + 0.5f - span / 2f;
-        float vBottom = 0.5f - cam.z / PatchSizeM + span / 2f;
+        float vBottom = 0.5f - cam.y / PatchSizeM + span / 2f;
         GUI.DrawTextureWithTexCoords(r, _patch, new Rect(uLeft, vBottom, span, -span));
 
         // затемнить всё, что за пределами патча
@@ -835,11 +875,10 @@ public class SimplePlanetClouds : MonoBehaviour
     {
         Vector2 ToScreen(Vector2 uv) => new Vector2(r.x + uv.x * r.width, r.y + (1f - uv.y) * r.height);
 
-        Vector3 cam = CameraPS;
         float half = PatchSizeM / 2f;
         foreach (var corner in new[] { new Vector2(-1, -1), new Vector2(1, -1), new Vector2(-1, 1), new Vector2(1, 1) })
-            Dot(ToScreen(MapUVAbove(cam.x + corner.x * half, cam.z + corner.y * half)), 5, Color.yellow);
-        Dot(ToScreen(MapUVAbove(cam.x, cam.z)), 7, Color.white);
+            Dot(ToScreen(MapUVAbove(corner.x * half, corner.y * half)), 5, Color.yellow);
+        Dot(ToScreen(MapUVAbove(0f, 0f)), 7, Color.white);
     }
 
     static void Fill(Rect r, Color color)

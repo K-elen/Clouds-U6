@@ -32,7 +32,8 @@ float CloudShellRemap(float x, float a)
 // Shape    = Shape Scale, Shape Factor, Shape Offset X, Shape Offset Z
 // Erosion  = Erosion Scale, сила эрозии, Micro Erosion Scale, сила микроэрозии (0 = выкл)
 // Coverage = порог покрытия, множитель покрытия, плотность, Shape Offset Y
-// Misc     = сдвиг от Altitude Distortion (xy), толщина слоя в метрах (z), степень покрытия coverageGamma (w)
+// Misc     = сдвиг шума эрозии по X и Z, метры (xy; как ветер у HDRP), толщина слоя в метрах (z),
+//            степень покрытия coverageGamma (w)
 // Fade     = с какого расстояния детали гаснут (x) и где пропадают совсем (y);
 //            где кончаются объёмные облака HDRP: начало (z) и конец (w) перехода к сфере. Всё в метрах
 void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS, float3 PositionAWS,
@@ -61,8 +62,7 @@ void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS
         float3 sp = ps;
         sp.y += sp.x / 3.0 + sp.z / 7.0;
         float3 shapeUVW = sp.xzy / CLOUD_SHELL_NOISE_NORMALIZATION * Shape.x
-                        - float3(Shape.z, Shape.w, Coverage.w)
-                        + h * float3(Misc.xy, 0.0);
+                        - float3(Shape.z, Shape.w, Coverage.w);
         float low = SAMPLE_TEXTURE3D(ShapeNoise.tex, ShapeNoise.samplerstate, shapeUVW).r;
 
         float shapeFactor = lerp(0.1, 1.0, Shape.y) * kCloudShellErosion[i];
@@ -70,14 +70,15 @@ void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS
         float baseCloud = 1.0 - kCloudShellDensity[i] * cov * (1.0 - shapeFactor);
         float d = saturate(CloudShellRemap(low, baseCloud)) * cov * cov;
 
-        // --- эрозия: та же текстура (Perlin 32 или Worley 32) и тот же масштаб ---
+        // --- эрозия: та же текстура (Perlin 32 или Worley 32), тот же масштаб и тот же сдвиг ---
+        float3 eps = ps + float3(Misc.x, 0.0, Misc.y);
         float e = 1.0 - SAMPLE_TEXTURE3D(ErosionNoise.tex, ErosionNoise.samplerstate,
-                                         ps / CLOUD_SHELL_NOISE_NORMALIZATION * Erosion.x).r;
+                                         eps / CLOUD_SHELL_NOISE_NORMALIZATION * Erosion.x).r;
         d = CloudShellRemap(d, e * Erosion.y * kCloudShellErosion[i] * cov);
 
         // --- микроэрозия (Erosion.w = 0, если выключена: тогда remap ничего не меняет) ---
         float m = 1.0 - SAMPLE_TEXTURE3D(ErosionNoise.tex, ErosionNoise.samplerstate,
-                                         ps / CLOUD_SHELL_NOISE_NORMALIZATION * Erosion.z).r;
+                                         eps / CLOUD_SHELL_NOISE_NORMALIZATION * Erosion.z).r;
         d = CloudShellRemap(d, m * Erosion.w * kCloudShellErosion[i] * cov);
 
         opticalDepth += max(d, 0.0);
