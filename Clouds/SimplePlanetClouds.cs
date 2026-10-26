@@ -70,11 +70,12 @@ public class SimplePlanetClouds : MonoBehaviour
              "Заменяет Cumulus Map Multiplier в Volume (тот скрипт держит равным 1).")]
     [Range(0f, 3f)] public float coverageMultiplier = 1f;
 
-    [Tooltip("Как полупрозрачные места карты превращаются в зернистые облака (Cumulus). HDRP возводит покрытие " +
-             "в квадрат, и без поправки полупрозрачное почти исчезает. 0.35–0.5 — доля неба под облаками примерно " +
-             "равна альфе карты; 1 — без поправки. У ровных облаков (Alto Stratus) поправки нет: их плотность " +
-             "идёт за яркостью карты. Действует одинаково на объёмные облака и сферу.")]
-    [Range(0.2f, 1f)] public float coverageGamma = 0.4f;
+    [Tooltip("С какого покрытия начинаются облака. Ниже ~0.4 HDRP не рисует ничего (при обычных Shape Factor " +
+             "и Erosion Factor), поэтому самое тонкое облако карты получает это покрытие, а самое плотное — 1. " +
+             "Тогда полупрозрачное на карте — редкие клочья, плотное — сплошные облака, и рисунок карты " +
+             "сохраняется. Если тонкие места пустые — увеличьте; если клочья лезут в ясное небо — уменьшите. " +
+             "Действует одинаково на объёмные облака и сферу.")]
+    [Range(0f, 0.8f)] public float coverageStart = 0.4f;
 
     [Header("Сфера")]
     [Tooltip("На какой высоте над землёй висит сфера с облаками, км.")]
@@ -508,9 +509,10 @@ public class SimplePlanetClouds : MonoBehaviour
     /// <summary>
     /// Значения трёх карт HDRP в точке — из альфы карты облаков и долей типов из карты типов.
     /// Шейдер сферы считает ровно так же (CloudShellMapInputs в CloudShellHDRP.hlsl), поэтому слои совпадают.
-    ///  - Покрытие: порог и множитель. У зернистых — ещё степень coverageGamma: HDRP возводит покрытие
-    ///    в квадрат, и без неё полупрозрачное почти исчезает. У ровных степени нет: их плотность идёт за
-    ///    яркостью карты, иначе сплошной пласт выходит ровным белым пятном без своего рисунка.
+    ///  - Покрытие: порог и множитель дают 0..1, затем 0..1 растягивается на coverageStart..1. До ~0.4 HDRP
+    ///    не рисует ничего; так самое тонкое облако карты — уже редкие клочья, а доля неба под облаками
+    ///    растёт вместе с альфой карты почти линейно (проверено расчётом с текстурами HDRP).
+    ///    Ясное небо (0) остаётся нулём.
     ///  - Тип включается в полную силу, как только его доля больше 25%. На границе типов HDRP рисует
     ///    смешанный тип с покрытием max(Cumulus, Alto Stratus). Если делить покрытие между ними
     ///    пропорционально долям, посередине границы оно падает вдвое — и получается пустой шов.
@@ -520,10 +522,11 @@ public class SimplePlanetClouds : MonoBehaviour
     void MapInputs(float alpha, Color types, out float cumulus, out float stratus, out float cumulonimbus)
     {
         float cov = Mathf.Clamp01((alpha - coverageThreshold) / (1f - coverageThreshold) * coverageMultiplier);
-        float grainyCov = Mathf.Pow(cov, coverageGamma);
-        cumulus = grainyCov * Mathf.Clamp01(types.r / TypeFullAt);
+        if (cov > 0f)
+            cov = Mathf.Lerp(coverageStart, 1f, cov);
+        cumulus = cov * Mathf.Clamp01(types.r / TypeFullAt);
         stratus = cov * Mathf.Clamp01(types.g / TypeFullAt);
-        cumulonimbus = types.b >= StormCoreAt ? grainyCov * types.b : 0f;
+        cumulonimbus = types.b >= StormCoreAt ? cov * types.b : 0f;
     }
 
     /// <summary>
@@ -546,7 +549,7 @@ public class SimplePlanetClouds : MonoBehaviour
     void UpdatePatch()
     {
         string key = $"{startLatitude}|{startLongitude}|{patchSizeKm}|{coverageThreshold}|{coverageMultiplier}|" +
-                     $"{coverageGamma}|{PlanetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}|{cloudTypes}";
+                     $"{coverageStart}|{PlanetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}|{cloudTypes}";
         if (key != _patchKey)
         {
             _patchKey = key;
@@ -716,7 +719,7 @@ public class SimplePlanetClouds : MonoBehaviour
         // сдвиг шума эрозии на пройденный путь (как ветер у HDRP, см. FollowPlanetInHdrp; по модулю
         // 10 000 км, чтобы хватило точности float), толщина слоя, степень покрытия
         _shellMat.SetVector("_CloudMisc", new Vector4(
-            (float)(planet.PlanarX % 1e7), (float)(planet.PlanarZ % 1e7), _clouds.altitudeRange.value, coverageGamma));
+            (float)(planet.PlanarX % 1e7), (float)(planet.PlanarZ % 1e7), _clouds.altitudeRange.value, coverageStart));
 
         // Где детали гаснут, и где сфера подхватывает облака у границы объёмных (последние 15% пути до неё).
         // Граница не дальше половины патча: дальше объёмные облака повторяют патч, а не карту.

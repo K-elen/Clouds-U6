@@ -28,17 +28,17 @@
 
 // Значения трёх карт HDRP из альфы карты облаков и долей типов — ровно как MapInputs в
 // SimplePlanetClouds.cs (там же подробно, почему так):
-//  - покрытие: порог и множитель; у зернистых ещё степень gamma, у ровных — нет;
+//  - покрытие: порог и множитель, затем 0..1 растягивается на start..1 (до ~0.4 HDRP не рисует ничего);
 //  - тип в полную силу, как только его доля больше 25% (иначе на границе типов пустой шов);
 //  - грозовые ядра — только где их доля не меньше половины.
-void CloudShellMapInputs(float A, float3 types, float4 Coverage, float gamma,
+void CloudShellMapInputs(float A, float3 types, float4 Coverage, float start,
                          out float cumulus, out float stratus, out float cumulonimbus)
 {
     float cov = saturate((A - Coverage.x) / max(1.0 - Coverage.x, 1e-4) * Coverage.y);
-    float grainyCov = pow(cov, gamma);
-    cumulus = grainyCov * saturate(types.r / CLOUD_SHELL_TYPE_FULL_AT);
+    cov = cov > 0.0 ? lerp(start, 1.0, cov) : 0.0;   // ясное небо остаётся нулём
+    cumulus = cov * saturate(types.r / CLOUD_SHELL_TYPE_FULL_AT);
     stratus = cov * saturate(types.g / CLOUD_SHELL_TYPE_FULL_AT);
-    cumulonimbus = types.b >= CLOUD_SHELL_STORM_CORE_AT ? grainyCov * types.b : 0.0;
+    cumulonimbus = types.b >= CLOUD_SHELL_STORM_CORE_AT ? cov * types.b : 0.0;
 }
 
 // DensityRemap(x, a, 1, 0, 1) из HDRP
@@ -103,7 +103,7 @@ float CloudShellNoiseLod(float3 uvw, float textureSize)
 // Erosion  = Erosion Scale, сила эрозии, Micro Erosion Scale, сила микроэрозии (0 = выкл)
 // Coverage = порог покрытия, множитель покрытия, плотность, Shape Offset Y
 // Misc     = сдвиг шума эрозии по X и Z, метры (xy; как ветер у HDRP), толщина слоя в метрах (z),
-//            степень покрытия зернистых облаков coverageGamma (w)
+//            с какого покрытия начинаются облака coverageStart (w)
 // Fade     = с какого расстояния детали гаснут (x) и где пропадают совсем (y);
 //            где кончаются объёмные облака HDRP: начало (z) и конец (w) перехода к сфере. Всё в метрах
 void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS, float3 PositionAWS,
@@ -117,7 +117,7 @@ void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS
     // значения трёх карт — так же, как скрипт режет патчи, — и то, что HDRP получил бы из них
     float3 types = SAMPLE_TEXTURE2D(CloudTypes.tex, CloudTypes.samplerstate, UV).rgb;
     float cumulus, stratus, cumulonimbus;
-    CloudShellMapInputs(A, types, Coverage, Misc.w > 0.0 ? Misc.w : 1.0, cumulus, stratus, cumulonimbus);
+    CloudShellMapInputs(A, types, Coverage, Misc.w, cumulus, stratus, cumulonimbus);
     float coverage, cloudType, bandBottom, bandTop;
     CloudShellMapData(cumulus, stratus, cumulonimbus, coverage, cloudType, bandBottom, bandTop);
 
