@@ -53,8 +53,8 @@ public class SimplePlanetClouds : MonoBehaviour
              "Пусто — берётся Base Color Map из материала сферы.")]
     public Texture2D patchSourceTexture;
 
-    [Tooltip("Карта типов облаков (Tools/classify_cloud_types.py): R — доля кучевых, G — слоистых, " +
-             "B — кучево-дождевых. Та же проекция, что у карты облаков; хватает 2048×1024. " +
+    [Tooltip("Карта типов облаков (Tools/classify_cloud_types.py): R — доля зернистых облаков (Cumulus Map), " +
+             "G — ровных (Alto Stratus Map), B — грозовых ядер (Cumulonimbus Map). Та же проекция, что у карты облаков; хватает 2048×1024. " +
              "Импорт: Read/Write включён, sRGB выключен, Compression = None. Пусто — все облака кучевые.")]
     public Texture2D cloudTypes;
 
@@ -604,7 +604,7 @@ public class SimplePlanetClouds : MonoBehaviour
         _patchPixels[Stratus][n] = Gray(coverage * types.g);
         _patchPixels[Cumulonimbus][n] = Gray(coverage * types.b);
 
-        // мини-карта: кучевые — тёплый белый, слоистые — голубой, кучево-дождевые — красный (как в превью)
+        // мини-карта: зернистые — тёплый белый, ровные — голубой, грозовые ядра — красный (как в превью)
         Color tint = types.r * new Color(1f, 0.85f, 0.55f) + types.g * new Color(0.35f, 0.7f, 1f)
                    + types.b * new Color(1f, 0.15f, 0.1f);
         _patchColorPixels[n] = (Color32)(tint * coverage);
@@ -874,7 +874,7 @@ public class SimplePlanetClouds : MonoBehaviour
 
         DrawMinimap(new Rect(10, y, 240, 240));
         GUI.Label(new Rect(10, y + 242, 240, 52),
-                  "облака: жёлтые — кучевые, голубые — слоистые, красные — грозовые; в рамке — патч, " +
+                  "облака: жёлтые — зернистые (Cumulus), голубые — ровные (Alto Stratus), красные — грозовые ядра; в рамке — патч, " +
                   "затемнено — повторы; белая точка — камера, сиреневое — взгляд, зелёное — горизонт", small);
 
         var r = new Rect(260, y, 380, 190);
