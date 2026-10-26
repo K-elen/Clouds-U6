@@ -26,6 +26,8 @@ Depth Write выкл, Receive Fog вкл, Preserve Specular Lighting выкл.
 | Color | `_BaseColor` | белый |
 | Texture3D | `_ShapeNoise` | — |
 | Texture3D | `_ErosionNoise` | — |
+| Texture2D | `_CloudTypes` | — |
+| Texture2D | `_CloudLut` | — |
 | Vector4 | `_CloudLayer` | (0, -6371000, 0, 6372200) |
 | Vector4 | `_CloudShape` | (5, 0.9, 0, 0) |
 | Vector4 | `_CloudErosion` | (107, 0.45, 200, 0) |
@@ -48,6 +50,8 @@ Depth Write выкл, Receive Fog вкл, Preserve Specular Lighting выкл.
 | PositionAWS | Vector3 |
 | ShapeNoise | Texture3D |
 | ErosionNoise | Texture3D |
+| CloudTypes | Texture2D |
+| CloudLut | Texture2D |
 | Layer | Vector4 |
 | Shape | Vector4 |
 | Erosion | Vector4 |
@@ -68,6 +72,8 @@ Depth Write выкл, Receive Fog вкл, Preserve Specular Lighting выкл.
 | нода **Position**, Space = **Absolute World** | PositionAWS |
 | `_ShapeNoise` | ShapeNoise |
 | `_ErosionNoise` | ErosionNoise |
+| `_CloudTypes` | CloudTypes |
+| `_CloudLut` | CloudLut |
 | `_CloudLayer` … `_CloudFade` | Layer … Fade |
 | `_BaseColor` | BaseColor **и** блок **Base Color** |
 | Alpha | блок **Alpha** |
@@ -171,5 +177,13 @@ HDRP не знает о повороте планеты, поэтому `SimpleP
 в Cumulus, Alto Stratus и Cumulonimbus Map. У грозовых значение — развитость (высота башни), покрытие
 у них в HDRP всегда 0.75. Пустое поле — все облака кучевые, как раньше.
 
-Пока по типам работают только объёмные облака: шейдер сферы ещё считает всё кучевыми.
+Сфера считает типы так же: из карты облаков и карты типов шейдер получает то, что HDRP получил бы
+из трёх карт (покрытие, тип, высоту), и шагает по высоте только там, где у этого типа есть облака,
+с профилем из той же таблицы HDRP (`CloudLutRainAO`, поле `hdrpCloudLut` подставляется само).
+Без карты типов сфера считает всё кучевыми, как раньше.
+
+Особенности, которые идут от самого HDRP:
+- слоистые при том же покрытии тоньше кучевых — у них тоньше слой по таблице;
+- вокруг грозовых бывает тонкий светлый ободок: у только зарождающейся грозы покрытие растёт до 1,
+  а у развитой — 0.75.
 

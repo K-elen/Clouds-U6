@@ -101,6 +101,10 @@ public class SimplePlanetClouds : MonoBehaviour
     [Tooltip("3D-шум эрозии HDRP «Perlin 32» (PerlinNoise32RGB). В редакторе подставляется сам.")]
     public Texture3D hdrpPerlinErosion;
 
+    [Tooltip("Таблица HDRP с профилями облаков по высоте для каждого типа (CloudLutRainAO). " +
+             "В редакторе подставляется сама.")]
+    public Texture2D hdrpCloudLut;
+
     [Header("Отладка")]
     [Tooltip("Панель в левом верхнем углу: высота, переход, мини-карта патча с камерой, " +
              "направлением взгляда и горизонтом.")]
@@ -247,8 +251,8 @@ public class SimplePlanetClouds : MonoBehaviour
         _shellHasDetail = _shellMat.HasProperty("_CloudShape");
         if (!_shellHasDetail)
             Problem("в материале сферы нет _CloudShape — граф без CloudShellHDRP, деталей на сфере не будет");
-        else if (hdrpShapeNoise == null || hdrpWorleyErosion == null || hdrpPerlinErosion == null)
-            Problem("не заданы 3D-шумы HDRP (hdrpShapeNoise, hdrpWorleyErosion, hdrpPerlinErosion)");
+        else if (hdrpShapeNoise == null || hdrpWorleyErosion == null || hdrpPerlinErosion == null || hdrpCloudLut == null)
+            Problem("не заданы текстуры HDRP (hdrpShapeNoise, hdrpWorleyErosion, hdrpPerlinErosion, hdrpCloudLut)");
 
         _shell = new GameObject("Cloud Shell");
         _shell.AddComponent<MeshFilter>().mesh = MakeSphere(256);
@@ -683,6 +687,8 @@ public class SimplePlanetClouds : MonoBehaviour
             _clouds.microErosionScale.value, micro));
 
         if (hdrpShapeNoise != null) _shellMat.SetTexture("_ShapeNoise", hdrpShapeNoise);
+        if (hdrpCloudLut != null) _shellMat.SetTexture("_CloudLut", hdrpCloudLut);
+        _shellMat.SetTexture("_CloudTypes", cloudTypes != null ? cloudTypes : AllCumulus);
         Texture3D erosion = perlin ? hdrpPerlinErosion : hdrpWorleyErosion;
         if (erosion != null) _shellMat.SetTexture("_ErosionNoise", erosion);
 
@@ -703,6 +709,22 @@ public class SimplePlanetClouds : MonoBehaviour
                                                       reach * 0.85f, reach));
     }
 
+    static Texture2D _allCumulus;
+    /// <summary>Карта типов из одного пикселя «всё кучевые» — когда своей карты типов нет.</summary>
+    static Texture2D AllCumulus
+    {
+        get
+        {
+            if (_allCumulus == null)
+            {
+                _allCumulus = new Texture2D(1, 1, TextureFormat.RGBA32, false, true) { name = "AllCumulus" };
+                _allCumulus.SetPixel(0, 0, new Color(1f, 0f, 0f, 1f));
+                _allCumulus.Apply(false, true);
+            }
+            return _allCumulus;
+        }
+    }
+
 #if UNITY_EDITOR
     const string HdrpNoiseFolder =
         "Packages/com.unity.render-pipelines.high-definition/Runtime/RenderPipelineResources/Texture/VolumetricClouds/";
@@ -711,7 +733,7 @@ public class SimplePlanetClouds : MonoBehaviour
     void OnValidate() => FindHdrpNoise();
 
     /// <summary>
-    /// Находит в пакете HDRP те же 3D-текстуры, которыми рисуются объёмные облака.
+    /// Находит в пакете HDRP те же 3D-текстуры шума и таблицу профилей, которыми рисуются объёмные облака.
     /// Ссылки сохраняются в сцене, поэтому в билде они тоже будут.
     /// </summary>
     void FindHdrpNoise()
@@ -722,6 +744,8 @@ public class SimplePlanetClouds : MonoBehaviour
             hdrpWorleyErosion = UnityEditor.AssetDatabase.LoadAssetAtPath<Texture3D>(HdrpNoiseFolder + "WorleyNoise32RGB.png");
         if (hdrpPerlinErosion == null)
             hdrpPerlinErosion = UnityEditor.AssetDatabase.LoadAssetAtPath<Texture3D>(HdrpNoiseFolder + "PerlinNoise32RGB.png");
+        if (hdrpCloudLut == null)
+            hdrpCloudLut = UnityEditor.AssetDatabase.LoadAssetAtPath<Texture2D>(HdrpNoiseFolder + "CloudLutRainAO.png");
     }
 #endif
 
