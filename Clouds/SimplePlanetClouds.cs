@@ -537,7 +537,10 @@ public class SimplePlanetClouds : MonoBehaviour
                     _patchPixels[j * PatchResolution + i] = PatchPixel(i, j);
 
         _patch.SetPixels32(_patchPixels);
-        _patch.Apply(false);   // HDRP заметит обновление текстуры и перестроит свою карту облаков
+        _patch.Apply(false);
+        // HDRP перестраивает свою карту облаков, только когда видит, что текстура обновилась (по её
+        // счётчику обновлений). Увеличиваем счётчик явно — Apply не обязательно это делает.
+        _patch.IncrementUpdateCount();
     }
 
     /// <summary>

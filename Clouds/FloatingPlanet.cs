@@ -38,7 +38,10 @@ public class FloatingPlanet : MonoBehaviour
 
     double _altitudeShiftM;              // на сколько планета отодвинулась вниз от начального положения
     double _planarX, _planarZ;           // пройдено по горизонтали — как по плоской карте, в осях мира
-    Quaternion _rotation = Quaternion.identity;   // поворот планеты от начального положения
+    // Поворот планеты от начального положения — кватернион в double. За кадр планета поворачивается
+    // на миллионные доли градуса; во float такие шаги со временем начинают теряться, а предметы рядом
+    // с камерой (в 6000 км от центра) дрожали бы на полметра.
+    double _qx, _qy, _qz, _qw = 1.0;
 
     VisualEnvironment _environment;      // из копии профиля SkyVolume
     Vector3 _contentOffset;              // где planetContent стоял относительно центра планеты в начале
@@ -54,7 +57,7 @@ public class FloatingPlanet : MonoBehaviour
     public Vector3 Center => new Vector3(0f, (float)(-radiusKm * 1000.0 - _altitudeShiftM), 0f);
 
     /// <summary>Поворот планеты от начального положения. Его нужно применять ко всему, что на ней нарисовано.</summary>
-    public Quaternion Rotation => _rotation;
+    public Quaternion Rotation => new Quaternion((float)_qx, (float)_qy, (float)_qz, (float)_qw);
 
     /// <summary>
     /// Сколько пройдено по горизонтали, метры, в осях мира — как если бы камера летела над плоской картой
@@ -117,12 +120,41 @@ public class FloatingPlanet : MonoBehaviour
 
         // Поворот вокруг оси «направление полёта × вверх» переводит точку впереди к вершине планеты.
         Vector3 axis = Vector3.Cross(horizontal / distance, Vector3.up);
-        _rotation = Quaternion.Normalize(Quaternion.AngleAxis((float)(angle * Mathf.Rad2Deg), axis) * _rotation);
+        RotatePlanet(axis, angle);
 
         // На плоской карте облачного слоя тот же поворот — это сдвиг на угол × радиус планеты.
         double planar = angle * radiusKm * 1000.0;
         _planarX += horizontal.x / distance * planar;
         _planarZ += horizontal.z / distance * planar;
+    }
+
+    /// <summary>
+    /// Поворачивает планету на angle радиан вокруг оси axis (единичной, в осях мира): новый поворот =
+    /// этот поворот × прежний. Обычное умножение кватернионов, только в double.
+    /// </summary>
+    void RotatePlanet(Vector3 axis, double angle)
+    {
+        double s = System.Math.Sin(angle * 0.5), c = System.Math.Cos(angle * 0.5);
+        double ax = axis.x * s, ay = axis.y * s, az = axis.z * s;
+
+        double x = c * _qx + ax * _qw + ay * _qz - az * _qy;
+        double y = c * _qy + ay * _qw + az * _qx - ax * _qz;
+        double z = c * _qz + az * _qw + ax * _qy - ay * _qx;
+        double w = c * _qw - ax * _qx - ay * _qy - az * _qz;
+
+        double n = System.Math.Sqrt(x * x + y * y + z * z + w * w);
+        _qx = x / n; _qy = y / n; _qz = z / n; _qw = w / n;
+    }
+
+    /// <summary>Поворачивает вектор v поворотом планеты, в double: v + 2·u×(u×v + w·v), где u = (qx, qy, qz).</summary>
+    void RotateVector(Vector3 v, out double x, out double y, out double z)
+    {
+        double tx = _qy * v.z - _qz * v.y + _qw * v.x;
+        double ty = _qz * v.x - _qx * v.z + _qw * v.y;
+        double tz = _qx * v.y - _qy * v.x + _qw * v.z;
+        x = v.x + 2.0 * (_qy * tz - _qz * ty);
+        y = v.y + 2.0 * (_qz * tx - _qx * tz);
+        z = v.z + 2.0 * (_qx * ty - _qy * tx);
     }
 
     /// <summary>
@@ -132,7 +164,11 @@ public class FloatingPlanet : MonoBehaviour
     void PlaceContent()
     {
         if (planetContent == null) return;
-        planetContent.SetPositionAndRotation(Center + _rotation * _contentOffset, _rotation * _contentRotation);
+        // Положение считаем в double: и центр, и повёрнутый сдвиг — тысячи километров, а их сумма у камеры — метры.
+        RotateVector(_contentOffset, out double x, out double y, out double z);
+        double centerY = -radiusKm * 1000.0 - _altitudeShiftM;
+        planetContent.SetPositionAndRotation(new Vector3((float)x, (float)(centerY + y), (float)z),
+                                             Rotation * _contentRotation);
         Physics.SyncTransforms();   // чтобы коллайдеры и CharacterController сразу узнали новые позиции
     }
 
