@@ -53,6 +53,11 @@ public class SimplePlanetClouds : MonoBehaviour
              "Пусто — берётся Base Color Map из материала сферы.")]
     public Texture2D patchSourceTexture;
 
+    [Tooltip("Карта типов облаков (Tools/classify_cloud_types.py): R — доля кучевых, G — слоистых, " +
+             "B — кучево-дождевых. Та же проекция, что у карты облаков; хватает 2048×1024. " +
+             "Импорт: Read/Write включён, sRGB выключен, Compression = None. Пусто — все облака кучевые.")]
+    public Texture2D cloudTypes;
+
     [Tooltip("Сторона патча, км: на квадрате такого размера вокруг камеры объёмные облака повторяют карту. " +
              "Патч едет вместе с камерой; дальше его краёв HDRP повторяет патч по кругу. " +
              "Больше — шире совпадение, но крупнее пиксели: в патче всего 256×256 пикселей.")]
@@ -129,8 +134,14 @@ public class SimplePlanetClouds : MonoBehaviour
     GameObject _shell;
     Material _shellMat;          // копия shellMaterial, чтобы не менять ассет
     bool _shellHasDetail;        // в материале есть параметры CloudShellHDRP
-    Texture2D _patch;            // карта покрытия для HDRP
-    Color32[] _patchPixels;      // её содержимое; перерисовываются только устаревшие строки и столбцы
+    // Три патча — по одному на карту HDRP: Cumulus, Alto Stratus и Cumulonimbus Map. Все режутся
+    // одинаково и едут за камерой вместе; перерисовываются только устаревшие строки и столбцы.
+    const int Cumulus = 0, Stratus = 1, Cumulonimbus = 2, PatchCount = 3;
+    static readonly string[] PatchNames = { "CloudPatch Cumulus", "CloudPatch Stratus", "CloudPatch Cumulonimbus" };
+    readonly Texture2D[] _patches = new Texture2D[PatchCount];
+    readonly Color32[][] _patchPixels = new Color32[PatchCount][];
+    Texture2D _patchColors;      // типы облаков цветом, только для мини-карты
+    Color32[] _patchColorPixels;
     Texture2D _patchSource;      // карта облаков планеты, из которой режется патч
     Quaternion _worldToMap;      // поворот из осей мира в оси карты (обратный к повороту сферы)
     Vector3 _baseShapeOffset;    // Shape Offset из профиля — к нему прибавляется сдвиг за пройденный путь
@@ -212,7 +223,8 @@ public class SimplePlanetClouds : MonoBehaviour
     {
         if (_shell != null) Destroy(_shell);
         if (_shellMat != null) Destroy(_shellMat);
-        if (_patch != null) Destroy(_patch);
+        foreach (var patch in _patches) if (patch != null) Destroy(patch);
+        if (_patchColors != null) Destroy(_patchColors);
     }
 
     /// <summary>Запоминает проблему: она видна в панели отладки и в консоли.</summary>
@@ -247,18 +259,17 @@ public class SimplePlanetClouds : MonoBehaviour
     }
 
     /// <summary>
-    /// Переводит Volumetric Clouds в режим, где карту покрытия задаём мы: Advanced, карта 256×256,
-    /// только Cumulus Map (остальные карты убраны), без сдвига карты.
-    /// Шейдер сферы рассчитан именно на такой режим.
+    /// Переводит Volumetric Clouds в режим, где карты облаков задаём мы: Advanced, карты 256×256 —
+    /// Cumulus, Alto Stratus и Cumulonimbus из наших патчей, без Rain Map, множители карт равны 1.
     /// </summary>
     void SetupVolumetricClouds()
     {
         _clouds.cloudControl.Override(VolumetricClouds.CloudControl.Advanced);
         _clouds.cloudMapResolution.Override(VolumetricClouds.CloudMapResolution.Ultra256x256);
         _clouds.cloudOffset.Override(Vector2.zero);
-        _clouds.altoStratusMap.Override(null);
-        _clouds.cumulonimbusMap.Override(null);
         _clouds.rainMap.Override(null);
+        _clouds.altoStratusMapMultiplier.Override(1f);
+        _clouds.cumulonimbusMapMultiplier.Override(1f);
 
         if (!Mathf.Approximately(_clouds.cumulusMapMultiplier.value, 1f))
             Debug.Log($"[Clouds] Cumulus Map Multiplier {_clouds.cumulusMapMultiplier.value:F2} заменён на 1, " +
@@ -512,7 +523,7 @@ public class SimplePlanetClouds : MonoBehaviour
     void UpdatePatch()
     {
         string key = $"{startLatitude}|{startLongitude}|{patchSizeKm}|{coverageThreshold}|{coverageMultiplier}|" +
-                     $"{coverageGamma}|{PlanetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}";
+                     $"{coverageGamma}|{PlanetRadiusKm}|{shellAltitudeKm}|{patchSourceTexture}|{cloudTypes}";
         if (key != _patchKey)
         {
             _patchKey = key;
@@ -534,13 +545,18 @@ public class SimplePlanetClouds : MonoBehaviour
         for (int j = 0; j < PatchResolution; j++)
             for (int i = 0; i < PatchResolution; i++)
                 if (_columnDirty[i] || _rowDirty[j])
-                    _patchPixels[j * PatchResolution + i] = PatchPixel(i, j);
+                    UpdatePatchPixel(i, j);
 
-        _patch.SetPixels32(_patchPixels);
-        _patch.Apply(false);
-        // HDRP перестраивает свою карту облаков, только когда видит, что текстура обновилась (по её
-        // счётчику обновлений). Увеличиваем счётчик явно — Apply не обязательно это делает.
-        _patch.IncrementUpdateCount();
+        for (int k = 0; k < PatchCount; k++)
+        {
+            _patches[k].SetPixels32(_patchPixels[k]);
+            _patches[k].Apply(false);
+            // HDRP перестраивает свою карту облаков, только когда видит, что текстура обновилась (по её
+            // счётчику обновлений). Увеличиваем счётчик явно — Apply не обязательно это делает.
+            _patches[k].IncrementUpdateCount();
+        }
+        _patchColors.SetPixels32(_patchColorPixels);
+        _patchColors.Apply(false);
     }
 
     /// <summary>
@@ -562,17 +578,39 @@ public class SimplePlanetClouds : MonoBehaviour
     }
 
     /// <summary>
-    /// Один пиксель патча: место мира, за которое он сейчас отвечает (его столбец и строка
-    /// с выбранными копиями), и покрытие карты облаков над этим местом.
+    /// Один пиксель всех патчей: место мира, за которое он сейчас отвечает (его столбец и строка
+    /// с выбранными копиями), покрытие карты облаков над ним и доли типов из карты типов.
+    ///  - Cumulus и Alto Stratus: покрытие × доля типа. Там, где оба больше 1%, HDRP рисует смешанный тип —
+    ///    карта типов сделана так, что это только узкие границы.
+    ///  - Cumulonimbus: у HDRP это не покрытие, а развитость облака — чем больше, тем выше башня;
+    ///    покрытие у грозовых всегда 0.75. Ставим покрытие × долю: яркие ядра — самые высокие.
     /// </summary>
-    Color32 PatchPixel(int i, int j)
+    void UpdatePatchPixel(int i, int j)
     {
         // место на плоской карте минус путь камеры — это место относительно камеры
         float x = (float)(ColumnX(i) + (double)_columnCopy[i] * PatchSizeM - planet.PlanarX);
         float z = (float)(RowZ(j) + (double)_rowCopy[j] * PatchSizeM - planet.PlanarZ);
         Vector2 uv = MapUVAbove(x, z);
-        byte c = (byte)(Coverage(_patchSource.GetPixelBilinear(uv.x, uv.y).a) * 255f);
-        return new Color32(c, c, c, 255);
+
+        float coverage = Coverage(_patchSource.GetPixelBilinear(uv.x, uv.y).a);
+        Color types = cloudTypes != null ? cloudTypes.GetPixelBilinear(uv.x, uv.y) : new Color(1f, 0f, 0f);
+
+        int n = j * PatchResolution + i;
+        _patchPixels[Cumulus][n] = Gray(coverage * types.r);
+        _patchPixels[Stratus][n] = Gray(coverage * types.g);
+        _patchPixels[Cumulonimbus][n] = Gray(coverage * types.b);
+
+        // мини-карта: кучевые — тёплый белый, слоистые — голубой, кучево-дождевые — красный (как в превью)
+        Color tint = types.r * new Color(1f, 0.85f, 0.55f) + types.g * new Color(0.35f, 0.7f, 1f)
+                   + types.b * new Color(1f, 0.15f, 0.1f);
+        _patchColorPixels[n] = (Color32)(tint * coverage);
+        _patchColorPixels[n].a = 255;
+    }
+
+    static Color32 Gray(float v)
+    {
+        byte b = (byte)(Mathf.Clamp01(v) * 255f + 0.5f);
+        return new Color32(b, b, b, 255);
     }
 
     /// <summary>
@@ -589,18 +627,31 @@ public class SimplePlanetClouds : MonoBehaviour
         if (!_patchSource.isReadable)
             return $"у '{_patchSource.name}' выключен Read/Write — включите или задайте читаемую копию в patchSourceTexture";
 
-        if (_patch == null)
+        if (cloudTypes != null && !cloudTypes.isReadable)
+            return $"у '{cloudTypes.name}' выключен Read/Write — включите его в импорте карты типов";
+
+        if (_patchColors == null)
         {
-            _patch = new Texture2D(PatchResolution, PatchResolution, TextureFormat.RGBA32, false, true)
+            for (int k = 0; k < PatchCount; k++)
             {
-                name = "CloudPatch",
-                wrapMode = TextureWrapMode.Repeat   // как и в HDRP: за краем патч повторяется
-            };
-            _patchPixels = new Color32[PatchResolution * PatchResolution];
+                _patches[k] = NewPatchTexture(PatchNames[k]);
+                _patchPixels[k] = new Color32[PatchResolution * PatchResolution];
+            }
+            _patchColors = NewPatchTexture("CloudPatch Types");
+            _patchColorPixels = new Color32[PatchResolution * PatchResolution];
         }
-        _clouds.cumulusMap.Override(_patch);
+        _clouds.cumulusMap.Override(_patches[Cumulus]);
+        _clouds.altoStratusMap.Override(_patches[Stratus]);
+        _clouds.cumulonimbusMap.Override(_patches[Cumulonimbus]);
         return null;
     }
+
+    static Texture2D NewPatchTexture(string name) =>
+        new Texture2D(PatchResolution, PatchResolution, TextureFormat.RGBA32, false, true)
+        {
+            name = name,
+            wrapMode = TextureWrapMode.Repeat   // как и в HDRP: за краем патч повторяется
+        };
 
     // ==================================================================
     // Сфера: та же форма и эрозия, что у объёмных облаков
@@ -782,8 +833,8 @@ public class SimplePlanetClouds : MonoBehaviour
 
         float textHeight = 0f;
         foreach (var l in lines) textHeight += style.CalcHeight(new GUIContent(l), width);
-        bool maps = _ready && _patch != null && _patchError == null;
-        GUI.Box(new Rect(5, 5, width + 10, textHeight + (maps ? 290f : 10f)), GUIContent.none);
+        bool maps = _ready && _patchColors != null && _patchError == null;
+        GUI.Box(new Rect(5, 5, width + 10, textHeight + (maps ? 304f : 10f)), GUIContent.none);
 
         float y = 10f;
         foreach (var l in lines)
@@ -798,9 +849,9 @@ public class SimplePlanetClouds : MonoBehaviour
         var small = new GUIStyle(style) { fontSize = 11 };
 
         DrawMinimap(new Rect(10, y, 240, 240));
-        GUI.Label(new Rect(10, y + 242, 240, 40),
-                  "в жёлтой рамке — патч, затемнено — его повторы, белая точка — камера, " +
-                  "красная линия — взгляд, голубое — горизонт", small);
+        GUI.Label(new Rect(10, y + 242, 240, 52),
+                  "облака: жёлтые — кучевые, голубые — слоистые, красные — грозовые; в рамке — патч, " +
+                  "затемнено — повторы; белая точка — камера, сиреневое — взгляд, зелёное — горизонт", small);
 
         var r = new Rect(260, y, 380, 190);
         GUI.DrawTexture(r, _patchSource, ScaleMode.StretchToFill, false);
@@ -811,9 +862,9 @@ public class SimplePlanetClouds : MonoBehaviour
 
     /// <summary>
     /// Мини-карта вокруг камеры: камера в центре, +X мира вправо, +Z вверх.
-    /// Яркий квадрат в жёлтой рамке — patchSizeKm вокруг камеры, где объёмные облака совпадают
+    /// Облака раскрашены по типам. Яркий квадрат в жёлтой рамке — patchSizeKm вокруг камеры, где объёмные облака совпадают
     /// с картой; он едет вместе с камерой. Затемнено — где HDRP уже повторяет патч.
-    /// Поверх — направление взгляда и круг горизонта.
+    /// Поверх — направление взгляда (сиреневое) и круг горизонта (зелёный).
     /// </summary>
     void DrawMinimap(Rect r)
     {
@@ -826,7 +877,7 @@ public class SimplePlanetClouds : MonoBehaviour
         // меньший Z мира, то есть больший V; отрицательная высота переворачивает картинку.
         float uLeft = cam.x / PatchSizeM + 0.5f - span / 2f;
         float vBottom = 0.5f - cam.y / PatchSizeM + span / 2f;
-        GUI.DrawTextureWithTexCoords(r, _patch, new Rect(uLeft, vBottom, span, -span));
+        GUI.DrawTextureWithTexCoords(r, _patchColors, new Rect(uLeft, vBottom, span, -span));
 
         // затемнить всё, что за пределами патча
         var inside = new Rect(r.center.x - scale / 2f, r.center.y - scale / 2f, scale, scale);
@@ -843,7 +894,7 @@ public class SimplePlanetClouds : MonoBehaviour
         {
             float a = k / 120f * Mathf.PI * 2f;
             Vector2 q = r.center + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * horizon;
-            if (r.Contains(q)) Dot(q, 3, Color.cyan);
+            if (r.Contains(q)) Dot(q, 3, Color.green);
         }
 
         // направление взгляда (экранный Y смотрит вниз, поэтому минус у Z)
@@ -853,7 +904,7 @@ public class SimplePlanetClouds : MonoBehaviour
         {
             look.Normalize();
             for (int k = 2; k < 28; k += 2)
-                Dot(r.center + new Vector2(look.x, -look.y) * k, 3, Color.red);
+                Dot(r.center + new Vector2(look.x, -look.y) * k, 3, Color.magenta);
         }
 
         Dot(r.center, 8, Color.white);
