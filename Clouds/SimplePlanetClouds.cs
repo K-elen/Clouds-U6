@@ -70,9 +70,10 @@ public class SimplePlanetClouds : MonoBehaviour
              "Заменяет Cumulus Map Multiplier в Volume (тот скрипт держит равным 1).")]
     [Range(0f, 3f)] public float coverageMultiplier = 1f;
 
-    [Tooltip("Как полупрозрачные места карты превращаются в облака. HDRP возводит покрытие в квадрат, " +
-             "и без поправки полупрозрачное почти исчезает. 0.35–0.5 — доля неба под облаками примерно " +
-             "равна альфе карты; 1 — без поправки. Действует одинаково на объёмные облака и сферу.")]
+    [Tooltip("Как полупрозрачные места карты превращаются в зернистые облака (Cumulus). HDRP возводит покрытие " +
+             "в квадрат, и без поправки полупрозрачное почти исчезает. 0.35–0.5 — доля неба под облаками примерно " +
+             "равна альфе карты; 1 — без поправки. У ровных облаков (Alto Stratus) поправки нет: их плотность " +
+             "идёт за яркостью карты. Действует одинаково на объёмные облака и сферу.")]
     [Range(0.2f, 1f)] public float coverageGamma = 0.4f;
 
     [Header("Сфера")]
@@ -499,13 +500,31 @@ public class SimplePlanetClouds : MonoBehaviour
     /// </summary>
     float RowZ(int j) => (0.5f - (j + 0.5f) / PatchResolution) * PatchSizeM;
 
+    // Доля типа, с которой он включается в полную силу (см. MapInputs).
+    const float TypeFullAt = 0.25f;
+    // Грозовые ядра пишутся в карту только там, где их доля не меньше этой.
+    const float StormCoreAt = 0.5f;
+
     /// <summary>
-    /// Альфа карты облаков → покрытие 0..1: порог, множитель и степень.
-    /// Шейдер сферы считает ровно так же (CloudShellHDRP.hlsl), поэтому слои совпадают.
+    /// Значения трёх карт HDRP в точке — из альфы карты облаков и долей типов из карты типов.
+    /// Шейдер сферы считает ровно так же (CloudShellMapInputs в CloudShellHDRP.hlsl), поэтому слои совпадают.
+    ///  - Покрытие: порог и множитель. У зернистых — ещё степень coverageGamma: HDRP возводит покрытие
+    ///    в квадрат, и без неё полупрозрачное почти исчезает. У ровных степени нет: их плотность идёт за
+    ///    яркостью карты, иначе сплошной пласт выходит ровным белым пятном без своего рисунка.
+    ///  - Тип включается в полную силу, как только его доля больше 25%. На границе типов HDRP рисует
+    ///    смешанный тип с покрытием max(Cumulus, Alto Stratus). Если делить покрытие между ними
+    ///    пропорционально долям, посередине границы оно падает вдвое — и получается пустой шов.
+    ///  - Грозовые ядра — только где их доля не меньше половины: в HDRP грозовые заменяют все остальные
+    ///    типы, и слабое значение по краю ядра вырезало бы облака вокруг. Значение — развитость (высота башни).
     /// </summary>
-    float Coverage(float alpha) =>
-        Mathf.Pow(Mathf.Clamp01((alpha - coverageThreshold) / (1f - coverageThreshold) * coverageMultiplier),
-                  coverageGamma);
+    void MapInputs(float alpha, Color types, out float cumulus, out float stratus, out float cumulonimbus)
+    {
+        float cov = Mathf.Clamp01((alpha - coverageThreshold) / (1f - coverageThreshold) * coverageMultiplier);
+        float grainyCov = Mathf.Pow(cov, coverageGamma);
+        cumulus = grainyCov * Mathf.Clamp01(types.r / TypeFullAt);
+        stratus = cov * Mathf.Clamp01(types.g / TypeFullAt);
+        cumulonimbus = types.b >= StormCoreAt ? grainyCov * types.b : 0f;
+    }
 
     /// <summary>
     /// UV карты облаков над местом (x, z) — метры по горизонтали от камеры: берём точку сферы облаков
@@ -583,11 +602,7 @@ public class SimplePlanetClouds : MonoBehaviour
 
     /// <summary>
     /// Один пиксель всех патчей: место мира, за которое он сейчас отвечает (его столбец и строка
-    /// с выбранными копиями), покрытие карты облаков над ним и доли типов из карты типов.
-    ///  - Cumulus и Alto Stratus: покрытие × доля типа. Там, где оба больше 1%, HDRP рисует смешанный тип —
-    ///    карта типов сделана так, что это только узкие границы.
-    ///  - Cumulonimbus: у HDRP это не покрытие, а развитость облака — чем больше, тем выше башня;
-    ///    покрытие у грозовых всегда 0.75. Ставим покрытие × долю: яркие ядра — самые высокие.
+    /// с выбранными копиями), и значения трёх карт HDRP над ним (MapInputs).
     /// </summary>
     void UpdatePatchPixel(int i, int j)
     {
@@ -596,13 +611,15 @@ public class SimplePlanetClouds : MonoBehaviour
         float z = (float)(RowZ(j) + (double)_rowCopy[j] * PatchSizeM - planet.PlanarZ);
         Vector2 uv = MapUVAbove(x, z);
 
-        float coverage = Coverage(_patchSource.GetPixelBilinear(uv.x, uv.y).a);
+        float alpha = _patchSource.GetPixelBilinear(uv.x, uv.y).a;
         Color types = cloudTypes != null ? cloudTypes.GetPixelBilinear(uv.x, uv.y) : new Color(1f, 0f, 0f);
+        MapInputs(alpha, types, out float cumulus, out float stratus, out float cumulonimbus);
 
         int n = j * PatchResolution + i;
-        _patchPixels[Cumulus][n] = Gray(coverage * types.r);
-        _patchPixels[Stratus][n] = Gray(coverage * types.g);
-        _patchPixels[Cumulonimbus][n] = Gray(coverage * types.b);
+        _patchPixels[Cumulus][n] = Gray(cumulus);
+        _patchPixels[Stratus][n] = Gray(stratus);
+        _patchPixels[Cumulonimbus][n] = Gray(cumulonimbus);
+        float coverage = Mathf.Max(cumulus, stratus, cumulonimbus);
 
         // мини-карта: зернистые — тёплый белый, ровные — голубой, грозовые ядра — красный (как в превью)
         Color tint = types.r * new Color(1f, 0.85f, 0.55f) + types.g * new Color(0.35f, 0.7f, 1f)
