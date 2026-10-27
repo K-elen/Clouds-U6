@@ -165,7 +165,6 @@ public class SimplePlanetClouds : MonoBehaviour
     float _altitudeKm;           // высота камеры над землёй
     float _horizonKm;            // расстояние до горизонта с этой высоты
     float _transition;           // 0 — только объёмные облака, 1 — только сфера
-    float _volumetricReachM;     // докуда с этой высоты видны объёмные облака HDRP; дальше рисует сфера
 
     readonly List<string> _problems = new List<string>();
 
@@ -314,7 +313,6 @@ public class SimplePlanetClouds : MonoBehaviour
 
         // 0 ниже fadeStartKm, 1 выше fadeEndKm, плавно между ними
         _transition = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(fadeStartKm, fadeEndKm, _altitudeKm));
-        _volumetricReachM = VolumetricReachM();
 
         UpdatePatch();
         UpdateVolumetricClouds();
@@ -375,9 +373,7 @@ public class SimplePlanetClouds : MonoBehaviour
     static float Frac(double v) => (float)(v - System.Math.Floor(v));
 
     /// <summary>
-    /// Сфера проявляется по мере перехода (альфа в _BaseColor). Кроме того, когда камера над облаками,
-    /// сфера всегда рисует облака там, куда не дотягиваются объёмные (см. VolumetricReachM), —
-    /// иначе вокруг камеры был бы круг облаков, а дальше пусто. Прячется, только когда не нужна вовсе.
+    /// Сфера проявляется только по мере перехода по высоте (альфа в _BaseColor) и прячется, пока он не начался.
     /// Радиус пересчитывается, чтобы shellAltitudeKm можно было менять прямо в игре.
     /// </summary>
     void UpdateShell()
@@ -387,47 +383,9 @@ public class SimplePlanetClouds : MonoBehaviour
         _shellMat.SetColor("_BaseColor", tint);
         _shell.transform.SetPositionAndRotation(PlanetCenter, planet.Rotation * MapRotation);
         _shell.transform.localScale = Vector3.one * (PlanetRadiusKm + shellAltitudeKm) * 1000f;
-        _shell.SetActive(_transition > 0.001f || !float.IsInfinity(_volumetricReachM));
+        _shell.SetActive(_transition > 0.001f);
 
         UpdateShellDetail();
-    }
-
-    /// <summary>
-    /// Докуда, в метрах от камеры, HDRP рисует объёмные облака, если смотреть на них сверху.
-    /// Луч HDRP проходит внутри облачного слоя не больше Num Primary Steps × (Altitude Range / 8) метров,
-    /// считая от верхней границы слоя (так в VolumetricCloudsUtilities.hlsl). Кучевые облака лежат внизу
-    /// слоя, поэтому косой луч издалека до них просто не доходит, и вокруг камеры остаётся круг облаков.
-    /// Ищем наклон, при котором луч ещё успевает дойти от верха слоя до середины кучевых, — расстояние
-    /// до этой точки и есть граница. Камера в слое или под ним — ограничения нет (бесконечность).
-    /// </summary>
-    float VolumetricReachM()
-    {
-        double r = PlanetRadiusKm * 1000.0;
-        double bottom = r + _clouds.bottomAltitude.value;
-        double range = _clouds.altitudeRange.value;
-        double top = bottom + range;
-        double cumulus = bottom + 0.15 * range;   // середина кучевых: HDRP рисует их в нижних 2–24% слоя
-        double maxMarch = _clouds.numPrimarySteps.value * range / 8.0;
-        double cam = Vector3.Distance(player.position, PlanetCenter);
-        if (cam <= top) return float.PositiveInfinity;
-
-        // Расстояние вдоль луча до ближайшего пересечения со сферой радиуса radius;
-        // луч идёт вниз под углом angle от отвесной линии. Нет пересечения — бесконечность.
-        double Hit(double angle, double radius)
-        {
-            double b = -cam * System.Math.Cos(angle);
-            double disc = b * b - (cam * cam - radius * radius);
-            return disc < 0 ? double.PositiveInfinity : -b - System.Math.Sqrt(disc);
-        }
-
-        // Наклон 0 (прямо вниз) — облака видны; касательная к слою кучевых — уже нет. Делим пополам.
-        double lo = 0, hi = System.Math.Asin(cumulus / cam);
-        for (int i = 0; i < 40; i++)
-        {
-            double mid = (lo + hi) * 0.5;
-            if (Hit(mid, cumulus) - Hit(mid, top) <= maxMarch) lo = mid; else hi = mid;
-        }
-        return (float)Hit(lo, cumulus);
     }
 
     /// <summary>
@@ -721,12 +679,8 @@ public class SimplePlanetClouds : MonoBehaviour
         _shellMat.SetVector("_CloudMisc", new Vector4(
             (float)(planet.PlanarX % 1e7), (float)(planet.PlanarZ % 1e7), _clouds.altitudeRange.value, coverageStart));
 
-        // Где детали гаснут, и где сфера подхватывает облака у границы объёмных (последние 15% пути до неё).
-        // Граница не дальше половины патча: дальше объёмные облака повторяют патч, а не карту.
-        float reach = Mathf.Min(_volumetricReachM, PatchSizeM * 0.5f);
-        if (float.IsInfinity(_volumetricReachM)) reach = 1e12f;
-        _shellMat.SetVector("_CloudFade", new Vector4(detailFadeStartKm * 1000f, detailFadeEndKm * 1000f,
-                                                      reach * 0.85f, reach));
+        // где детали гаснут (zw не используются)
+        _shellMat.SetVector("_CloudFade", new Vector4(detailFadeStartKm * 1000f, detailFadeEndKm * 1000f, 0f, 0f));
     }
 
     static Texture2D _allCumulus;
@@ -866,8 +820,6 @@ public class SimplePlanetClouds : MonoBehaviour
             Vector3 travel = planet.TravelKm;
             lines.Add($"пролетели от старта: X {travel.x:F1} км, Y {travel.y:F1} км, Z {travel.z:F1} км");
             lines.Add($"патч {patchSizeKm:F0} км вокруг камеры, пиксель {patchSizeKm / PatchResolution:F1} км");
-            if (!float.IsInfinity(_volumetricReachM))
-                lines.Add($"объёмные облака видны до ~{_volumetricReachM / 1000f:F0} км, дальше их продолжает сфера");
             lines.Add($"до горизонта ~{_horizonKm:F0} км" +
                       (_horizonKm > patchSizeKm / 2f && _transition < 0.999f
                           ? " — дальше края патча (затемнённое на мини-карте)" : ""));

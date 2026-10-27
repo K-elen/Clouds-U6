@@ -104,8 +104,7 @@ float CloudShellNoiseLod(float3 uvw, float textureSize)
 // Coverage = порог покрытия, множитель покрытия, плотность, Shape Offset Y
 // Misc     = сдвиг шума эрозии по X и Z, метры (xy; как ветер у HDRP), толщина слоя в метрах (z),
 //            с какого покрытия начинаются облака coverageStart (w)
-// Fade     = с какого расстояния детали гаснут (x) и где пропадают совсем (y);
-//            где кончаются объёмные облака HDRP: начало (z) и конец (w) перехода к сфере. Всё в метрах
+// Fade     = с какого расстояния детали гаснут (x) и где пропадают совсем (y), метры; zw не используются
 void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS, float3 PositionAWS,
                            UnityTexture3D ShapeNoise, UnityTexture3D ErosionNoise,
                            UnityTexture2D CloudTypes, UnityTexture2D CloudLut,
@@ -187,11 +186,8 @@ void CloudShellAlpha_float(UnityTexture2D CloudMap, float2 UV, float3 PositionWS
     float dist = length(PositionWS);
     float fade = 1.0 - smoothstep(Fade.x, Fade.y, dist);
 
-    // Сфера — дальний план объёмных облаков. Дальше того места, куда дотягиваются лучи HDRP,
-    // она видна полностью; ближе — только по мере перехода по высоте (альфа BaseColor).
-    float visibility = max(BaseColor.a, smoothstep(Fade.z, Fade.w, dist));
-
-    Alpha = saturate(lerp(A, detailed, fade)) * visibility;
+    // Сфера видна только по мере перехода по высоте (альфа BaseColor).
+    Alpha = saturate(lerp(A, detailed, fade)) * BaseColor.a;
 }
 
 #endif
