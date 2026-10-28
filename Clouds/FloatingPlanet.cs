@@ -15,7 +15,9 @@ using UnityEngine.Rendering.HighDefinition;
 ///
 /// Ссылок задавать не нужно: Volume с облаками и Visual Environment скрипт находит в сцене сам.
 ///
-/// Для HDRP центр планеты задаётся в Visual Environment (Center Mode = Manual). Повороты планеты HDRP
+/// Радиус планеты — Planet Radius из Visual Environment того же Volume (в HDRP по умолчанию 6378.1 км):
+/// задаётся там, скрипт только читает его. Центр планеты скрипт сам ставит в Visual Environment
+/// (Center Mode = Manual). Повороты планеты HDRP
 /// не знает — объёмные облака под поворот подстраивает SimplePlanetClouds по PlanarTravel.
 /// </summary>
 [DefaultExecutionOrder(-100)]   // раньше остальных скриптов: они в этом кадре уже видят новое положение планеты
@@ -25,10 +27,6 @@ public class FloatingPlanet : MonoBehaviour
     // Настройки
 
     [Header("Планета")]
-    [Tooltip("Радиус планеты, км. Скрипт сам ставит его в Planet Radius в Visual Environment " +
-             "(в HDRP по умолчанию 6378.1).")]
-    public float radiusKm = 6378.1f;
-
     [Tooltip("Корневой объект со всем, что стоит на планете: рельеф, постройки, объекты. " +
              "Он едет и поворачивается вместе с планетой. Пусто — на планете нет ничего, кроме неба и облаков.")]
     public Transform planetContent;
@@ -44,6 +42,7 @@ public class FloatingPlanet : MonoBehaviour
     double _qx, _qy, _qz, _qw = 1.0;
 
     VisualEnvironment _environment;      // из копии профиля SkyVolume
+    const float DefaultRadiusKm = 6378.1f;   // радиус по умолчанию в HDRP — если Volume не найден
     Vector3 _contentOffset;              // где planetContent стоял относительно центра планеты в начале
     Quaternion _contentRotation;         // и как был повёрнут
 
@@ -53,8 +52,14 @@ public class FloatingPlanet : MonoBehaviour
     /// </summary>
     public Volume SkyVolume { get; private set; }
 
+    /// <summary>
+    /// Радиус планеты, км, — Planet Radius из Visual Environment в SkyVolume. Меняется там же,
+    /// в том числе прямо в игре.
+    /// </summary>
+    public float RadiusKm => _environment != null ? _environment.planetRadius.value : DefaultRadiusKm;
+
     /// <summary>Центр планеты в мире, метры. Всегда прямо под камерой; в начале — (0, -радиус, 0).</summary>
-    public Vector3 Center => new Vector3(0f, (float)(-radiusKm * 1000.0 - _altitudeShiftM), 0f);
+    public Vector3 Center => new Vector3(0f, (float)(-RadiusKm * 1000.0 - _altitudeShiftM), 0f);
 
     /// <summary>Поворот планеты от начального положения. Его нужно применять ко всему, что на ней нарисовано.</summary>
     public Quaternion Rotation => new Quaternion((float)_qx, (float)_qy, (float)_qz, (float)_qw);
@@ -76,6 +81,7 @@ public class FloatingPlanet : MonoBehaviour
     void Awake()
     {
         SkyVolume = FindSkyVolume();
+        SetupVisualEnvironment();   // сначала — из него берётся радиус планеты
 
         if (planetContent != null)
         {
@@ -90,8 +96,6 @@ public class FloatingPlanet : MonoBehaviour
             Fly(cam.transform.position);
             cam.transform.position = Vector3.zero;
         }
-
-        SetupVisualEnvironment();
     }
 
     // В LateUpdate: контроллер уже сделал свой ход за этот кадр, а рендер ещё не начался.
@@ -115,7 +119,7 @@ public class FloatingPlanet : MonoBehaviour
         float distance = horizontal.magnitude;
         if (distance <= 0f) return;
 
-        double cameraRadius = radiusKm * 1000.0 + _altitudeShiftM;   // от центра планеты до камеры
+        double cameraRadius = RadiusKm * 1000.0 + _altitudeShiftM;   // от центра планеты до камеры
         double angle = distance / cameraRadius;                     // радианы
 
         // Поворот вокруг оси «направление полёта × вверх» переводит точку впереди к вершине планеты.
@@ -123,7 +127,7 @@ public class FloatingPlanet : MonoBehaviour
         RotatePlanet(axis, angle);
 
         // На плоской карте облачного слоя тот же поворот — это сдвиг на угол × радиус планеты.
-        double planar = angle * radiusKm * 1000.0;
+        double planar = angle * RadiusKm * 1000.0;
         _planarX += horizontal.x / distance * planar;
         _planarZ += horizontal.z / distance * planar;
     }
@@ -166,7 +170,7 @@ public class FloatingPlanet : MonoBehaviour
         if (planetContent == null) return;
         // Положение считаем в double: и центр, и повёрнутый сдвиг — тысячи километров, а их сумма у камеры — метры.
         RotateVector(_contentOffset, out double x, out double y, out double z);
-        double centerY = -radiusKm * 1000.0 - _altitudeShiftM;
+        double centerY = -RadiusKm * 1000.0 - _altitudeShiftM;
         planetContent.SetPositionAndRotation(new Vector3((float)x, (float)(centerY + y), (float)z),
                                              Rotation * _contentRotation);
         Physics.SyncTransforms();   // чтобы коллайдеры и CharacterController сразу узнали новые позиции
@@ -174,7 +178,8 @@ public class FloatingPlanet : MonoBehaviour
 
     /// <summary>
     /// Берёт Visual Environment из SkyVolume (нет — добавляет) и переводит его на ручной центр планеты:
-    /// Rendering Space = World, Center Mode = Manual. Радиус и центр ставятся каждый кадр.
+    /// Rendering Space = World, Center Mode = Manual. Центр ставится каждый кадр, радиус берётся
+    /// из Planet Radius этого Visual Environment (если его не было — HDRP по умолчанию, 6378.1 км).
     /// Если Visual Environment есть ещё в одном Volume с большим приоритетом — он может перебить эти значения.
     /// </summary>
     void SetupVisualEnvironment()
@@ -208,11 +213,10 @@ public class FloatingPlanet : MonoBehaviour
         return best;
     }
 
-    /// <summary>Центр и радиус планеты для HDRP. Visual Environment хранит их в километрах.</summary>
+    /// <summary>Центр планеты для HDRP. Visual Environment хранит его в километрах.</summary>
     void UpdateVisualEnvironment()
     {
         if (_environment == null) return;
-        _environment.planetRadius.Override(radiusKm);
         _environment.planetCenter.Override(Center / 1000f);
     }
 }

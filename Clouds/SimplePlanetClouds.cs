@@ -188,7 +188,7 @@ public class SimplePlanetClouds : MonoBehaviour
     Vector3 PlanetCenter => planet.Center;
 
     /// <summary>Радиус планеты, км — из FloatingPlanet.</summary>
-    float PlanetRadiusKm => planet.radiusKm;
+    float PlanetRadiusKm => planet.RadiusKm;
 
     float PatchSizeM => patchSizeKm * 1000f;
 
