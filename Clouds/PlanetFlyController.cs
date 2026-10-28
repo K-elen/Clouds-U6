@@ -1,5 +1,5 @@
 using UnityEngine;
-#if ENABLE_INPUT_SYSTEM
+#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
 using UnityEngine.InputSystem;
 #endif
 
@@ -52,8 +52,12 @@ public class PlanetFlyController : MonoBehaviour
         if (planet != null && step != Vector3.zero) planet.Fly(step);
     }
 
-    // --- ввод: работает и с новой, и со старой системой ---
-#if ENABLE_INPUT_SYSTEM
+    // --- ввод ---
+    // Старая система ввода (Input), если она включена (Active Input Handling = Input Manager или Both):
+    // она есть в любом проекте. Новая (Input System) — только если старая выключена; тогда в проекте
+    // должен стоять пакет Input System, а если скрипт лежит под Assembly Definition — в нём должна быть
+    // ссылка на Unity.InputSystem.
+#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
     const Key KeyW = Key.W, KeyS = Key.S, KeyA = Key.A, KeyD = Key.D,
               KeyE = Key.E, KeyQ = Key.Q, KeyShift = Key.LeftShift;
     static float Held(Key k) => Keyboard.current[k].isPressed ? 1f : 0f;
